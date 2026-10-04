@@ -1,0 +1,7 @@
+﻿checkpoints/
+data/
+*.log
+__pycache__/
+.pytest_cache/
+*.pt
+*.tmp
