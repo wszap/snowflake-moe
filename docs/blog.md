@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 39b3c1e52d56df687e379d81ca7e9c3c_29b3b4cac0cd11f1bc7f525400638852
+    ReservedCode1: tBdnyE4hBDrT4OZIyL+ujFCJEw09WGcc47kCJIPZKVo3+4Rm7v6Zxot0ZjafWWrf72JVz1USXIZMW2Q4tkMl5uZafs+VrFj7fwp/LtXyyEQiZtKXtLffqanX0+GOsiTaxatfZ6qL802jhya/JFoA4sLEqWEAN7i1TnsIjjHv9aZdMhQRG8EAPSKLqUo=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 39b3c1e52d56df687e379d81ca7e9c3c_29b3b4cac0cd11f1bc7f525400638852
+    ReservedCode2: tBdnyE4hBDrT4OZIyL+ujFCJEw09WGcc47kCJIPZKVo3+4Rm7v6Zxot0ZjafWWrf72JVz1USXIZMW2Q4tkMl5uZafs+VrFj7fwp/LtXyyEQiZtKXtLffqanX0+GOsiTaxatfZ6qL802jhya/JFoA4sLEqWEAN7i1TnsIjjHv9aZdMhQRG8EAPSKLqUo=
+---
+
 # Snowflake MoE 进展记录：从可组合架构到 scale bug 修复
 
 作者：Wu Shangzhen (Independent Researcher) · 2026-10-05
@@ -61,3 +72,4 @@ Snowflake MoE 是一个可组合的稀疏 MoE 架构。与标准 MoE 维护一�
 1. **翻盘实验**：等待 PAI-DSW 上用 scale=1.0 重跑的四个实验（阶段一、终身学习 v6、安全擦除 v2、组合泛化 + Fixed 对比），结果出来后更新本文与报告。
 2. **规模扩展**：把模型扩到 100MB 数据 + 10M 参数，验证可组合架构在大规模下的参数效率与组合优势。
 3. **论文投稿**：以「可导容量惩罚」为主线整理实验，目标投稿。
+*（内容由AI生成，仅供参考）*
