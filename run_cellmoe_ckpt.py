@@ -330,8 +330,9 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                                 seed=SEED + step_global + 1)
             t_data = time.time() - t0
 
-            for g in opt.param_groups:
-                g['lr'] = lr_at(step_global)
+            if step_global % 10 == 0:
+                for g in opt.param_groups:
+                    g['lr'] = lr_at(step_global)
             opt.zero_grad(set_to_none=True)
 
             t0 = time.time()
