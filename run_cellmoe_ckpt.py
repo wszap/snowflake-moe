@@ -35,7 +35,7 @@ NUM_WORKERS = 4        # 数据预取并发位：Windows 下 DataLoader spawn �
                        # 张量反而更慢，故用双缓冲预取等效实现（CPU 预取与 GPU 计算并行）
 MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 小时内"红线）
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
-DIAG_EVERY = 50          # 每 50 step 打印 data_load_time / model_forward_time
+DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
 LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 0.05, 0.05, 0.05
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
@@ -292,7 +292,7 @@ def gpu_temp():
 
 
 def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
-    opt = torch.optim.Adam(model.parameters(), lr=LR)
+    opt = torch.optim.Adam(model.parameters(), lr=LR, fused=True)
     n_steps = max(1, train_ids.numel() // (SEQ_LEN * BATCH_SIZE))
     epochs = EPOCHS
     total_steps = n_steps * epochs
