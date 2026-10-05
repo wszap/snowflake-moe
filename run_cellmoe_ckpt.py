@@ -335,27 +335,28 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
             opt.zero_grad(set_to_none=True)
 
             t0 = time.time()
-            logits, info = model(xb)
-            t_fwd = time.time() - t0
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                logits, info = model(xb)
+                t_fwd = time.time() - t0
+                ce_loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
+                loss = ce_loss
+                if use_reg and isinstance(info, dict):
+                    cell_infos = info.get('cell_infos', [info])
+                    ent_sum = mem_sum = org_sum = 0.0
+                    for ci in cell_infos:
+                        w = ci['weights']
+                        ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()
+                        mu = ci['memory_attn'].mean(dim=0)
+                        mem_sum += (mu * mu).sum() * mu.shape[-1]
+                        fs = w.mean(dim=0)
+                        org_sum += (fs * fs).sum() * w.shape[-1]
+                    nc = len(cell_infos)
+                    gate = info['gate']
+                    gate_ent = -(gate * (gate + 1e-9).log()).sum(-1).mean()
+                    loss = (ce_loss - LAMBDA_ENT * (ent_sum / nc + 0.25 * gate_ent)
+                            + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ORG * (org_sum / nc))
 
             t0 = time.time()
-            ce_loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
-            loss = ce_loss
-            if use_reg and isinstance(info, dict):
-                cell_infos = info.get('cell_infos', [info])
-                ent_sum = mem_sum = org_sum = 0.0
-                for ci in cell_infos:
-                    w = ci['weights']
-                    ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()
-                    mu = ci['memory_attn'].mean(dim=0)
-                    mem_sum += (mu * mu).sum() * mu.shape[-1]
-                    fs = w.mean(dim=0)
-                    org_sum += (fs * fs).sum() * w.shape[-1]
-                nc = len(cell_infos)
-                gate = info['gate']
-                gate_ent = -(gate * (gate + 1e-9).log()).sum(-1).mean()
-                loss = (ce_loss - LAMBDA_ENT * (ent_sum / nc + 0.25 * gate_ent)
-                        + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ORG * (org_sum / nc))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
