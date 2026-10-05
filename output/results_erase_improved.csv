@@ -1,0 +1,4 @@
+case,erase_ratio,val_ppl,gate_entropy
+baseline,0.0,12.7415,0.1714
+erase_50,0.5,17.5299,0.1714
+erase_100,1.0,39.5849,0.1714

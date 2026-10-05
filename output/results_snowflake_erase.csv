@@ -1,0 +1,6 @@
+stage,shakespeare_ppl,recoverable
+baseline,12.8126,n/a
+erased_50,12.8174,n/a
+erased_100,13.7804,n/a
+recover_50,12.3148,yes
+recover_100,12.3697,yes

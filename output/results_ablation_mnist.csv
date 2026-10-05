@@ -1,0 +1,4 @@
+data,seed,mode,epochs,val_acc,train_acc,test_acc,loss,final_cv,active,avg_k,events,n_rewards,sec
+mnist,2026,learned_ablate_loss,30,0.94,0.997005,0.9415,0.013753,1.3186,0.578125,6.7143,0,0,34.5
+mnist,2026,learned_ablate_cv,30,0.94,0.997005,0.9415,0.013753,1.3186,0.578125,6.7143,0,0,37.2
+mnist,2026,learned_ablate_k,30,0.94,0.997005,0.9415,0.013753,1.3186,0.578125,6.7143,0,0,35.5

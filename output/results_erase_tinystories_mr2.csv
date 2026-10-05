@@ -1,0 +1,4 @@
+model,params,erase_frac,val_ce,val_ppl,note
+CellMoE,1823077,0.0,2.3043,10.0169,baseline (ckpt final_ppl=10.0169)
+CellMoE,1823077,0.5,2.4229,11.2788,erased 50% memory_value (256 slots/16 tensors)
+CellMoE,1823077,1.0,3.179,24.0217,erased 100% memory_value (512 slots/16 tensors)

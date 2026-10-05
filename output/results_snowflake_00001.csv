@@ -1,0 +1,2 @@
+data,seed,mode,epochs,val_ppl,val_loss,train_loss,mem_util,org_util,assemble_entropy,params,fixed_params,param_ratio,sec
+shakespeare,2026,snowflake,5,13.6383,2.6129,3.0214,0.3132,0.2589,3.5117,203713,259009,0.7865,19.3

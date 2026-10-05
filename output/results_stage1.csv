@@ -1,0 +1,2 @@
+stage,model,params,val_ce,val_ppl,old_v3_ppl,sec
+1,improved_hier_4c6o24m,310345,2.5449,12.7415,12.78,27.5

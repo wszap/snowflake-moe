@@ -1,0 +1,3 @@
+phase,shakespeare_ppl,new_domain_ppl,new_memory_utilization
+baseline,12.8126,15.2695,0.0
+lifelong_1epoch,13.5482,14.1558,0.3418

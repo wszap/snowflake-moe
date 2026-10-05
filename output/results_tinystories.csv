@@ -1,0 +1,2 @@
+model,params,val_ce,val_ppl,gpu_util_pct,sec,epoch_secs,data_frac,note
+CellMoE,1823077,2.3042,10.0157,32.0,2276.6,476.1;254.0;716.5;311.1;511.9,0.0061,Fixed 对比下一轮再跑

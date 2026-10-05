@@ -1,0 +1,3 @@
+﻿model,val_ppl,avg_gpu_util_pct,epoch_secs,total_sec,paused_sec,pure_compute_sec,gpu_pauses,cpu_pauses,virtual_hot,non_real_hot,note
+CellMoE_v2,10.0154,49.0,449.1;463.7;414.8;523.5;358.5,2216.3,0.0,2216.3,0,0,183,50,本重跑：Fixed 同款温度判定逻辑（控制变量）
+Fixed(对照log),,,398;210;202;235;217,,,,9,0,285,2,历史 run_stage5_fixed.log 同口径统计

@@ -1,0 +1,2 @@
+model,params,val_ce,val_ppl,gpu_util_pct,sec,epoch_secs,data_frac,note
+FixedFFN_E14,1886053,2.3041,10.0152,88.2,1266.1,398.4;210.3;201.9;235.1;216.8,0.0852,CellMoE ¶ÔÕÕ¼û results_tinystories.csv

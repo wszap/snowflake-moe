@@ -1,0 +1,5 @@
+data,seed,mode,epochs,val_ppl,val_loss,train_loss,final_cv,active,avg_k,drop_ratio,events,n_rewards,sec
+shakespeare,2026,fixed,5,12.85288,2.553568,2.431873,0.816497,0.75,2.0,0.0,0,0,16.8
+shakespeare,2026,rules,5,13.12472,2.574497,2.503415,0.300685,1.0,2.0,0.0,0,0,19.6
+shakespeare,2026,learned,5,13.004695,2.56531,2.429752,0.816497,0.75,2.6774,0.0,30,610,19.9
+shakespeare,2026,learned_nok,5,12.994303,2.564511,2.426458,0.816497,0.75,2.0,0.0,30,610,12.0

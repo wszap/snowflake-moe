@@ -1,0 +1,3 @@
+data,seed,mode,epochs,val_acc,train_acc,test_acc,loss,final_cv,active,avg_k,drop_ratio,events,n_rewards,sec
+synth,2026,learned_capdrop,12,0.895508,0.864193,,0.515374,1.410845,0.78125,5.75,0.0,7,144,8.0
+synth,2026,learned_tokendrop,12,0.738281,0.828646,,0.605421,0.131842,1.0,5.25,0.7929,7,144,16.3

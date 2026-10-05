@@ -1,0 +1,2 @@
+data,seed,mode,epochs,val_acc,train_acc,test_acc,loss,final_cv,active,avg_k,events,n_rewards,sec
+synth,2026,learned_decoupled,14,0.723633,0.652604,,1.002888,1.42899,0.6875,5.5556,4,168,5.8

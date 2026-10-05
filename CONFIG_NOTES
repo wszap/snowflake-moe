@@ -1,0 +1,33 @@
+# CONFIG_NOTES
+
+Configuration notes for the Snowflake MoE (CellMoE) project.
+
+## Recommended Environment
+
+- OS: Windows 11 / Linux (Ubuntu 20.04+)
+- Python: 3.10+
+- GPU: NVIDIA with CUDA 12.8+ recommended (RTX 5060 Laptop tested)
+- PyTorch: >= 2.1.0 (CUDA build)
+
+## Key Design
+
+- Fine-grained experts + shared expert (memory point) + sparse top-k activation
+- Routing: learned (trainable gate), rules-based, or fixed baselines
+- Memory slots are decoupled from routing weights; erasable at inference
+- Data: TinyStories / Shakespeare / Bible / MNIST subsets (see data loader in each run script)
+
+## Training Config
+
+- TinyStories runs: 5 epochs, seq len 256, batch as in scripts, LR ~1e-3 with cosine schedule
+- MNIST runs: 30 epochs, learned gate with reward events
+- Lifelong: sequential domain addition with fixed memory; measure regression on old domain
+
+## Outputs
+
+- All experiment results are logged to `output/results_*.csv`
+- Figures (PNG) are also written to `output/`
+- Early/experimental scripts are archived under `early_experiments/` (not part of the stable pipeline)
+
+## Red Lines
+
+- Checkpoints, raw data, logs, and *.pt weights are NOT committed to the repository.

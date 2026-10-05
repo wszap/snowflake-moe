@@ -1,0 +1,3 @@
+model,id_ppl,ood_ppl,ood_id_ratio
+cellmoe_v3,15.0317,13.9253,0.9264
+fixed_moe,26.5113,18.1065,0.683
