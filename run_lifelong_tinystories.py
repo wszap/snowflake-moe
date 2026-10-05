@@ -47,7 +47,7 @@ class FastCellMoE_L(nn.Module):
     """FastCellMoE + add_new_memory 扩展（keys/asm/value 追加，None 时行为不变）。"""
 
     def __init__(self, d, n_organelles=8, n_memory=32, topk=4,
-                 memory_read_scale=25.0, h=32):
+                 memory_read_scale=1.0, h=32):
         super().__init__()
         self.d = d
         self.n_organelles = n_organelles
