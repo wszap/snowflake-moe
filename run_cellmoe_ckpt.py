@@ -22,6 +22,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# 训练加速：TF32 matmul（仅放宽精度，不改训练逻辑）
+torch.set_float32_matmul_precision('high')
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -127,7 +130,7 @@ class FastHierCellMoE(nn.Module):
         gate_sparse = torch.zeros_like(gate)
         gate_sparse.scatter_(1, topk_idx, topk_w)
         out = (gate_sparse.unsqueeze(-1) * cell_outs).sum(dim=1)
-        entropy = float(-(gate * (gate + 1e-9).log()).sum(-1).mean().item())
+        entropy = None  # 无消费方，删除以消除每步 .item() 同步
         return out, {"gate": gate, "gate_entropy": entropy,
                      "cell_infos": cell_infos}
 
@@ -356,7 +359,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
             t_opt = time.time() - t0
 
             step_global += 1
-            e_sum += loss.item()
+            e_sum += loss.detach()  # tensor 累积，不每步 .item() 同步，仅打印时触发
             e_n += 1
             d_cost = t_data
             w_data += d_cost
@@ -394,6 +397,18 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
             epoch_secs.append(round(e_sec, 1))
             print(f"[S5 {tag} EPOCH {epoch}/{epochs}] train_loss={e_sum / e_n:.4f} "
                   f"({e_sec:.0f}s, cum {time.time() - t_start:.0f}s)", flush=True)
+            # ---- checkpoint：每 epoch 结束保存一次（不改训练逻辑）----
+            ckpt_epoch_path = os.path.join(BASE, "checkpoints",
+                                           f"cellmoe_tinystories_epoch{epoch}.pt")
+            os.makedirs(os.path.dirname(ckpt_epoch_path), exist_ok=True)
+            torch.save({"state_dict": model.state_dict(),
+                        "cfg": dict(d=128, vocab_size=vocab_size, n_cells=4,
+                                    n_organelles=8, n_memory=32, topk_organelle=4,
+                                    topk_cell=2, L=4, seq_len=SEQ_LEN,
+                                    batch_size=BATCH_SIZE, epochs=epochs, seed=SEED,
+                                    epoch=epoch),
+                        "epoch": epoch}, ckpt_epoch_path)
+            print(f"[S5] CKPT saved (epoch {epoch}) -> {ckpt_epoch_path}", flush=True)
             if epoch == 1 and epochs == EPOCHS and e_sec > EPOCH_BUDGET_SEC:
                 print(f"[S5] epoch1 耗时 {e_sec:.0f}s > 预算 {EPOCH_BUDGET_SEC}s，"
                       f"按预案降 epochs {EPOCHS}->3", flush=True)
