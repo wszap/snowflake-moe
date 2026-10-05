@@ -61,6 +61,7 @@ class FastCellMoE_L(nn.Module):
         self.memory_keys = nn.Parameter(torch.randn(n_memory, d) * 0.1)
         self.memory_assembly = nn.Parameter(torch.zeros(n_memory, n_organelles))
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
+        self.group_w = nn.Parameter(torch.tensor([0.5]))
         self.head = nn.Linear(d, d, bias=False)
         self.last_topk = None
         self.memory_attn = None
@@ -97,10 +98,23 @@ class FastCellMoE_L(nn.Module):
             asm = torch.cat([self.memory_assembly, self.new_memory_assembly], dim=0)
             val = torch.cat([self.memory_value, self.new_memory_value], dim=0)
         sim = v @ keys.T / (self.d ** 0.5)
-        if self.training:
-            attn = F.gumbel_softmax(sim, tau=1.0, hard=False, dim=-1)
+        if self.new_memory_keys is not None:
+            n_old = self.memory_keys.shape[0]
+            sim_old, sim_new = sim[:, :n_old], sim[:, n_old:]
+            if self.training:
+                a_old = F.gumbel_softmax(sim_old, tau=1.0, hard=False, dim=-1)
+                a_new = F.gumbel_softmax(sim_new, tau=1.0, hard=False, dim=-1)
+            else:
+                a_old = F.softmax(sim_old / 1.0, dim=-1)
+                a_new = F.softmax(sim_new / 1.0, dim=-1)
+            w_old = torch.sigmoid(self.group_w)
+            attn = torch.cat([w_old * a_old, (1 - w_old) * a_new], dim=-1)
+            attn = attn / attn.sum(-1, keepdim=True).clamp_min(1e-9)
         else:
-            attn = F.softmax(sim / 1.0, dim=-1)
+            if self.training:
+                attn = F.gumbel_softmax(sim, tau=1.0, hard=False, dim=-1)
+            else:
+                attn = F.softmax(sim / 1.0, dim=-1)
         self.memory_attn = attn.detach()
         assembly = attn @ asm
         weights = F.softmax(assembly, dim=-1)
@@ -306,6 +320,7 @@ def main():
             cell.new_memory_keys.requires_grad_(True)
             cell.new_memory_assembly.requires_grad_(True)
             cell.new_memory_value.requires_grad_(True)
+            cell.group_w.requires_grad_(True)
     trainable = count_params(model)
     print(f"[LIFE] 冻结完成：{n_cells} 个细胞各 +{NEW_ADD}，"
           f"可训练参数={trainable}（新忆点 keys/asm/val）")
@@ -316,7 +331,8 @@ def main():
     # ---- 只训练新忆点：圣经 3 epoch ----
     key_params = [p for name, p in model.named_parameters()
                   if p.requires_grad and ("new_memory_keys" in name
-                                          or "new_memory_assembly" in name)]
+                                          or "new_memory_assembly" in name
+                                          or "group_w" in name)]
     val_params = [p for name, p in model.named_parameters()
                   if p.requires_grad and "new_memory_value" in name]
     opt = torch.optim.Adam([
