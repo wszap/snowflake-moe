@@ -112,12 +112,30 @@ def diagnose_representations(model, val_ids, seq_len, device=DEVICE, seed=2026,
     return
 
 
+def load_data(args):
+    """按 --data 加载数据；留空则用莎士比亚（原行为）。支持 .pt dict:
+    {'train': LongTensor, 'val': LongTensor, 'vocab_size': int, 'vocab': dict}"""
+    data_path = getattr(args, "data", None)
+    if data_path:
+        p = data_path if os.path.isabs(data_path) else os.path.join(BASE, data_path)
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"data file not found: {p}")
+        d = torch.load(p, map_location="cpu")
+        vocab_size = d["vocab_size"]
+        train_ids = d["train"].long()
+        val_ids = d["val"].long()
+        chars = d.get("vocab", {})
+        return vocab_size, train_ids, val_ids, chars, os.path.basename(p)
+    vocab_size, train_ids, val_ids, chars = load_shakespeare()
+    return vocab_size, train_ids, val_ids, chars, "shakespeare"
+
+
 def train_snowflake(args):
     global OUT_CSV
     if getattr(args, "out", None):
         OUT_CSV = os.path.abspath(args.out)
     set_seed(args.seed)
-    vocab_size, train_ids, val_ids, chars = load_shakespeare()
+    vocab_size, train_ids, val_ids, chars, data_name = load_data(args)
     model = SnowflakeMoE_LM(d=args.d, vocab_size=vocab_size,
                             n_organelles=args.n_organelles,
                             n_memory=args.n_memory,
@@ -247,6 +265,8 @@ def set_seed(seed):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--data", type=str, default="",
+                    help="训练数据 .pt 文件（dict: train/val/vocab_size），留空用莎士比亚")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--d", type=int, default=64)

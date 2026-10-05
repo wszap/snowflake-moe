@@ -157,7 +157,7 @@ class ImprovedCellMoE(nn.Module):
 
     def __init__(self, d, n_organelles=8, n_memory=32, topk_organelle=4,
                  use_memory_value=True, group_softmax=True, group_weight=0.5,
-                 memory_read_scale=25.0):
+                 memory_read_scale=1.0):
         super().__init__()
         self.d = d
         self.n_organelles = n_organelles
@@ -278,7 +278,7 @@ class ImprovedHierarchicalCellMoE(nn.Module):
 
     def __init__(self, d, n_cells=4, n_organelles=8, n_memory=32,
                  topk_organelle=4, topk_cell=2, gate_ent_reg=True,
-                 memory_read_scale=25.0):
+                 memory_read_scale=1.0):
         super().__init__()
         self.d = d
         self.n_cells = n_cells
@@ -364,7 +364,7 @@ class ImprovedHierarchicalCellMoE_LM(nn.Module):
 
     def __init__(self, d, vocab_size, n_cells=4, n_organelles=8, n_memory=32,
                  topk_organelle=4, topk_cell=2, L=2, gate_ent_reg=True,
-                 memory_read_scale=25.0):
+                 memory_read_scale=1.0):
         super().__init__()
         self.d = d
         self.vocab_size = vocab_size
