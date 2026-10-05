@@ -228,11 +228,11 @@ def load_tinystories(path=DATA, val_frac=0.1, seed=2026, use_mb=25):
 def lm_batch(ids, batch_size, seq_len, seed):
     g = torch.Generator().manual_seed(seed)
     n = ids.numel() - seq_len - 1
-    idx = torch.randint(0, n, (batch_size,), generator=g)
-    offsets = idx.unsqueeze(1) + torch.arange(seq_len)
+    idx = torch.randint(0, n, (batch_size,), generator=g).to(DEVICE)
+    offsets = idx.unsqueeze(1) + torch.arange(seq_len, device=DEVICE)
     xb = ids[offsets]
     yb = ids[offsets + 1]
-    return xb.to(DEVICE), yb.to(DEVICE)
+    return xb, yb
 
 
 def set_seed(seed):
@@ -292,6 +292,9 @@ def gpu_temp():
 
 
 def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
+    # 数据预加载到 GPU：训练前一次性搬运，避免每步 CPU→GPU 拷贝
+    train_ids = train_ids.to(DEVICE)
+    val_ids = val_ids.to(DEVICE)
     opt = torch.optim.Adam(model.parameters(), lr=LR, fused=True)
     n_steps = max(1, train_ids.numel() // (SEQ_LEN * BATCH_SIZE))
     epochs = EPOCHS
