@@ -29,7 +29,7 @@ from snowflake_moe import HierarchicalCellMoE_LM  # noqa: E402
 from train_lm import load_shakespeare, lm_batch, eval_ppl  # noqa: E402
 
 CKPT_PATH = os.path.join(BASE, "checkpoints", "v3_base_298k.pt")
-LIFELONG_CKPT = os.path.join(BASE, "checkpoints", "v3_lifelong.pt")
+LIFELONG_CKPT = os.path.join(BASE, "checkpoints", "v3_lifelong_2026.pt")
 DATA_DIR = os.path.join(BASE, "data")
 BIBLE_PATH = os.path.join(DATA_DIR, "bible_kjv.txt")
 NEW_TRAIN = os.path.join(DATA_DIR, "new_domain_train.pt")

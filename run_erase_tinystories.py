@@ -94,6 +94,12 @@ def main():
         rows.append(["CellMoE", n_params, frac, round(ce, 4), round(ppl, 4),
                      f"erased {frac*100:.0f}% memory_value "
                      f"({n_slots} slots/{len(names)} tensors)"])
+        # ---- checkpoint：擦除后模型保存（不改训练逻辑）----
+        ckpt_path = os.path.join(BASE, "checkpoints", f"erase_tinystories_{SEED}.pt")
+        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+        torch.save({"state_dict": model.state_dict(), "cfg": cfg,
+                    "erase_frac": frac}, ckpt_path)
+        print(f"[Erase] CKPT saved -> {ckpt_path}", flush=True)
         del model
         if DEVICE == "cuda":
             torch.cuda.empty_cache()

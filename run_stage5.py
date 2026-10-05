@@ -211,6 +211,16 @@ def main():
     print(f"[S5] CellMoE params={count_params(cell)} Fixed params={count_params(fixed)}")
 
     ce, cp, cu, ct = train_one(cell, train_ids, val_ids, vocab_size, "CellMoE", True)
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"stage5_cellmoe_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": cell.state_dict(),
+                "cfg": dict(d=128, vocab_size=vocab_size, n_cells=4,
+                            n_organelles=8, n_memory=32, topk_organelle=4,
+                            topk_cell=2, L=4, seq_len=SEQ_LEN,
+                            batch_size=BATCH_SIZE, epochs=EPOCHS, seed=SEED),
+                "final_ce": ce, "final_ppl": cp}, ckpt_path)
+    print(f"[S5] CKPT saved -> {ckpt_path}", flush=True)
     # CellMoE 训练完释放显存，再训 Fixed
     del cell
     if DEVICE == "cuda":
@@ -229,6 +239,16 @@ def main():
         w.writerow(["Fixed", count_params(fixed), round(fe, 4), round(fp, 4),
                     round(fu, 1), ft, 1.0])
     print(f"[S5] CSV -> {OUT_CSV}")
+
+    # ---- checkpoint：Fixed 最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"stage5_fixed_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": fixed.state_dict(),
+                "cfg": dict(d=128, vocab_size=vocab_size, L=4, width=8,
+                            seq_len=SEQ_LEN, batch_size=BATCH_SIZE,
+                            epochs=EPOCHS, seed=SEED),
+                "final_ce": fe, "final_ppl": fp}, ckpt_path)
+    print(f"[S5] CKPT saved -> {ckpt_path}", flush=True)
 
     # 验收
     ppl_ok = cp <= fp * 1.05

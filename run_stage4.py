@@ -219,6 +219,20 @@ def main():
                     rb["active"], rb["freq"], rb["sec"]])
     print(f"[S4] CSV -> {OUT_CSV}")
 
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    for tag, model, note in (("stage4_immune", ma, "免疫组A"),
+                             ("stage4_control", mb, "对照组B")):
+        ckpt_path = os.path.join(BASE, "checkpoints", f"{tag}_{SEED}.pt")
+        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+        torch.save({"model_state": model.state_dict(),
+                    "config": dict(d=128, vocab_size=vocab_size, n_cells=4,
+                                   n_organelles=8, n_memory=32,
+                                   topk_organelle=4, topk_cell=2, L=4,
+                                   seq_len=SEQ_LEN, batch_size=BATCH_SIZE,
+                                   epochs=EPOCHS, seed=SEED),
+                    "group": note}, ckpt_path)
+        print(f"[S4] CKPT saved -> {ckpt_path}", flush=True)
+
     # 验收
     ppl_ok = ra["val_ppl"] <= rb["val_ppl"]
     util_ok = util_a >= util_b * 1.1

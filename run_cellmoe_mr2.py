@@ -46,7 +46,7 @@ DATA = os.path.join(BASE, "tinystories_100mb.txt")
 OUT_CSV = os.path.abspath(os.path.join(BASE, "..", "output",
                                        "results_tinystories_mr2.csv"))
 CKPT_PATH = os.path.abspath(os.path.join(BASE, "checkpoints",
-                                        "cellmoe_tinystories_mr2.pt"))
+                                        f"cellmoe_mr2_{SEED}.pt"))
 
 
 # ---------------- 并行 Organelle（等价于 8 个串行 MLP(d->32->d)） ----------------

@@ -333,6 +333,15 @@ def main():
 
     ce, cp, cu, ct, es, df = train_one(fixed, train_ids, val_ids, vocab_size,
                                        "Fixed")
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"stage5_fixed_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": fixed.state_dict(),
+                "cfg": dict(d=128, vocab_size=vocab_size, L=4, width=WIDTH_E,
+                            seq_len=SEQ_LEN, batch_size=BATCH_SIZE,
+                            epochs=EPOCHS, seed=SEED),
+                "final_ce": ce, "final_ppl": cp}, ckpt_path)
+    print(f"[S5] CKPT saved -> {ckpt_path}", flush=True)
     del fixed
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

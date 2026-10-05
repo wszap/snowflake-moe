@@ -427,6 +427,16 @@ def main():
 
     ce, cp, cu, ct, es, df = train_one(cell, train_ids, val_ids, vocab_size,
                                        "CellMoE", True)
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"stage5_fast_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": cell.state_dict(),
+                "cfg": dict(d=128, vocab_size=vocab_size, n_cells=4,
+                            n_organelles=8, n_memory=32, topk_organelle=4,
+                            topk_cell=2, L=4, seq_len=SEQ_LEN,
+                            batch_size=BATCH_SIZE, epochs=EPOCHS, seed=SEED),
+                "final_ce": ce, "final_ppl": cp}, ckpt_path)
+    print(f"[S5] CKPT saved -> {ckpt_path}", flush=True)
     del cell
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

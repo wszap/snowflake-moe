@@ -36,7 +36,7 @@ BATCH_SIZE, EPOCHS, LR, SEED = 64, 3, 1e-3, 2026
 NEW_ADD = 8            # 每个细胞新增忆点数
 GPU_TEMP_MAX = 80
 CKPT_PATH = os.path.join(BASE, "checkpoints", "cellmoe_tinystories.pt")
-LIFELONG_CKPT = os.path.join(BASE, "checkpoints", "cellmoe_tinystories_lifelong.pt")
+LIFELONG_CKPT = os.path.join(BASE, "checkpoints", f"cellmoe_lifelong_{SEED}.pt")
 BIBLE_PATH = os.path.join(BASE, "data", "bible_kjv.txt")
 OUT_CSV = os.path.abspath(os.path.join(BASE, "..", "output",
                                        "results_lifelong_tinystories.csv"))

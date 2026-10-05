@@ -280,6 +280,12 @@ def main():
     rec100 = "yes" if rec100_ppl - base_ppl < 1.0 else "no"
     print(f"[3.4] recover_100 shakespeare_ppl={rec100_ppl:.3f} recoverable={rec100}")
     rows.append(("recover_100", round(rec100_ppl, 4), rec100))
+    # ---- checkpoint：最终模型保存（recover100 后，不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", "erase_2026.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": model100.state_dict(), "cfg": cfg,
+                "erase_ratio": 1.0, "recoverable": rec100}, ckpt_path)
+    print(f"[3.4] CKPT saved -> {ckpt_path}", flush=True)
     del model100
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

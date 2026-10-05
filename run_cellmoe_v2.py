@@ -255,6 +255,16 @@ def train_cellmoe_v2():
           f"total={total_sec}s pure={pure_sec}s paused={paused_sec}s "
           f"gpu_pauses={gpu_pauses} cpu_pauses={cpu_pauses} "
           f"virtual_hot={virtual_hot} non_real={non_real}")
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"cellmoe_v2_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": model.state_dict(),
+                "cfg": dict(d=128, vocab_size=vocab_size, n_cells=4,
+                            n_organelles=8, n_memory=32, topk_organelle=4,
+                            topk_cell=2, L=4, seq_len=SEQ_LEN,
+                            batch_size=BATCH_SIZE, epochs=epochs, seed=SEED),
+                "final_ce": val_ce, "final_ppl": val_ppl}, ckpt_path)
+    print(f"[V2] CKPT saved -> {ckpt_path}", flush=True)
     del model
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

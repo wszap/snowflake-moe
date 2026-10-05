@@ -148,6 +148,13 @@ def run_experiments(data="synth", seeds=(2026, 2027, 2028), modes=("fixed", "rul
             model, h, _ = train_v7(cfg, Xtr, ytr, Xva, yva, council_mode=m,
                                    seed=sd, epochs=epochs, batch_size=256, lr=2e-3,
                                    fixed_cap=cap, use_token_dropping=(m == 'learned_tokendrop'))
+            # ---- checkpoint：最终模型保存（不改训练逻辑）----
+            ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "checkpoints", f"experiments_{m}_{sd}.pt")
+            os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+            torch.save({"state_dict": model.state_dict(), "cfg": cfg,
+                        "mode": m, "seed": sd, "epochs": epochs}, ckpt_path)
+            print(f"[CKPT] saved -> {ckpt_path}", flush=True)
             test_acc = ""
             if Xte is not None:
                 model.eval()

@@ -64,6 +64,37 @@ python train_mnist.py
 python run_lm.py  # via run_experiments.py
 ```
 
+## Checkpoint 保存规范
+
+所有 `run_*.py` 训练脚本统一按以下规范保存模型，**只加保存、不改变训练逻辑**。
+
+**保存位置**：仓库根目录 `checkpoints/`（该目录已被 `.gitignore` 排除，模型文件**不会** push 到 GitHub，只保留本地；代码与 CSV 正常提交）。
+
+**命名规则**：`checkpoints/{实验名}_{seed}.pt`，seed 取脚本内 `SEED` 常量（默认 2026）。
+
+| 脚本 | 保存内容 | 命名 |
+|---|---|---|
+| `run_cellmoe_ckpt.py` | 每个 epoch 结束保存一次，最终 epoch 覆盖为最终版 | `cellmoe_tinystories_epoch{N}.pt` / `cellmoe_tinystories.pt` |
+| `run_cellmoe_v2.py` | 最终模型 | `cellmoe_v2_{seed}.pt` |
+| `run_cellmoe_mr2.py` | 最终模型 | `cellmoe_mr2_{seed}.pt` |
+| `run_stage1.py` | 最终模型 | `improved_v3_{seed}.pt` |
+| `run_stage2.py` | 最终模型 | `stage2_{seed}.pt` |
+| `run_stage3.py` | 持续学习后模型 | `improved_v3_lifelong_{seed}.pt` |
+| `run_stage4.py` | 免疫组 A / 对照组 B | `stage4_immune_{seed}.pt` / `stage4_control_{seed}.pt` |
+| `run_stage5.py` | CellMoE / Fixed 最终模型 | `stage5_cellmoe_{seed}.pt` / `stage5_fixed_{seed}.pt` |
+| `run_stage5_fast.py` | 最终模型 | `stage5_fast_{seed}.pt` |
+| `run_stage5_fixed.py` | 最终模型 | `stage5_fixed_{seed}.pt` |
+| `run_lifelong.py` | 持续学习后模型 | `v3_lifelong_{seed}.pt` |
+| `run_lifelong_tinystories.py` | 持续学习后模型 | `cellmoe_lifelong_{seed}.pt` |
+| `run_ood.py` | CellMoE / Fixed 最终模型 | `ood_cellmoe_{seed}.pt` / `ood_fixed_{seed}.pt` |
+| `run_ood_v2.py` | CellMoE / Fixed 最终模型 | `ood_v2_cellmoe_{seed}.pt` / `ood_v2_fixed_{seed}.pt` |
+| `run_erase.py` | 100% 擦除并恢复后模型 | `erase_{seed}.pt` |
+| `run_erase_mr2.py` | 擦除后模型（50%/100% 覆盖保存） | `erase_mr2_{seed}.pt` |
+| `run_erase_tinystories.py` | 擦除后模型（50%/100% 覆盖保存） | `erase_tinystories_{seed}.pt` |
+| `run_experiments.py` | 每个 (seed, mode) 组合最终模型 | `experiments_{mode}_{seed}.pt` |
+
+保存内容统一为 `torch.save` 的 dict：`state_dict` + 训练配置（`cfg`/`config`）+ 关键指标（如 `final_ppl`），便于后续加载复现。
+
 ## Core Results
 
 ### PPL Comparison (TinyStories, 5 epochs)

@@ -31,7 +31,7 @@ from snowflake_moe_improved import ImprovedHierarchicalCellMoE_LM  # noqa: E402
 from train_lm import load_shakespeare, lm_batch  # noqa: E402
 
 CKPT_PATH = os.path.join(BASE, "checkpoints", "improved_v3_2026.pt")
-LIFELONG_CKPT = os.path.join(BASE, "checkpoints", "improved_v3_lifelong.pt")
+LIFELONG_CKPT = os.path.join(BASE, "checkpoints", f"improved_v3_lifelong_{SEED}.pt")
 DATA_DIR = os.path.join(BASE, "data")
 NEW_TRAIN = os.path.join(DATA_DIR, "new_domain_train.pt")
 NEW_TEST = os.path.join(DATA_DIR, "new_domain_test.pt")

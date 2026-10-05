@@ -185,6 +185,16 @@ def main():
     rows.append(("cellmoe_v3", round(id_ppl, 4), round(ood_ppl, 4), round(ratio, 4)))
     print(f"[2.3] CellMoE  ID(喜剧)={id_ppl:.3f}  OOD(悲剧)={ood_ppl:.3f}  "
           f"OOD/ID={ratio:.4f}  ({sec:.0f}s)")
+    # ---- checkpoint：最终模型保存（不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", f"ood_cellmoe_{SEED}.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": cell.state_dict(),
+                "cfg": dict(d=64, vocab_size=vocab_size, n_organelles=20,
+                            n_memory=64, topk_organelle=4, L=2,
+                            seq_len=SEQ_LEN, batch_size=BATCH_SIZE,
+                            epochs=EPOCHS, seed=SEED),
+                "id_ppl": id_ppl, "ood_ppl": ood_ppl}, ckpt_path)
+    print(f"[2.3] CKPT saved -> {ckpt_path}", flush=True)
     del cell
     if DEVICE == "cuda":
         torch.cuda.empty_cache()

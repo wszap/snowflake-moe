@@ -127,6 +127,13 @@ def main():
     print(f"[S2 ERASE100] val_ce={ce100:.4f} val_ppl={ppl100:.4f} gate_entropy={ent100:.4f} "
           f"({len(erased100)} 组 {sum(len(v) for _, v in erased100)} 行置零)")
     rows.append(("erase_100", 1.0, round(ppl100, 4), round(ent100, 4)))
+    # ---- checkpoint：最终模型保存（100% 擦除后，不改训练逻辑）----
+    ckpt_path = os.path.join(BASE, "checkpoints", "stage2_2026.pt")
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    torch.save({"state_dict": model.state_dict(),
+                "cfg": ckpt.get("cfg", {}),
+                "erase_ratio": 1.0}, ckpt_path)
+    print(f"[S2] CKPT saved -> {ckpt_path}", flush=True)
     del model
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
