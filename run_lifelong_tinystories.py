@@ -299,7 +299,10 @@ def main():
                          n_memory=cfg["n_memory"],
                          topk_organelle=cfg["topk_organelle"],
                          topk_cell=cfg["topk_cell"], L=cfg["L"]).to(DEVICE)
-    model.load_state_dict(ckpt["state_dict"])
+    # 容忍新增的 group_w（旧 ckpt 无此参数，用初始化值 0.5）
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+    if missing:
+        print(f"[LIFE] missing keys (expected for new params): {missing}")
     print(f"[LIFE] ckpt loaded, recorded final_ppl={ckpt['final_ppl']:.4f}")
 
     # ---- 基线评估 ----
