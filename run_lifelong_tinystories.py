@@ -72,9 +72,9 @@ class FastCellMoE_L(nn.Module):
     def add_new_memory(self, add=8, seed=2026):
         dev = self.memory_keys.device
         g = torch.Generator(device=dev).manual_seed(seed)
-        new_keys = torch.randn(add, self.d, generator=g, device=dev) * 0.1
+        new_keys = torch.randn(add, self.d, generator=g, device=dev) * 0.3
         new_asm = torch.zeros(add, self.n_organelles, device=dev)
-        new_val = torch.zeros(add, self.d, device=dev)
+        new_val = torch.randn(add, self.d, device=dev) * 0.01
         if self.new_memory_keys is None:
             self.new_memory_keys = nn.Parameter(new_keys)
             self.new_memory_assembly = nn.Parameter(new_asm)
@@ -340,7 +340,7 @@ def main():
                   if p.requires_grad and "new_memory_value" in name]
     opt = torch.optim.Adam([
         {"params": key_params, "lr": LR, "weight_decay": 1e-2},
-        {"params": val_params, "lr": 1e-3, "weight_decay": 1e-1},
+        {"params": val_params, "lr": 1e-2, "weight_decay": 1e-1},
     ])
     n_steps = max(1, bible_train.numel() // (SEQ_LEN_ * BATCH_SIZE))
     t0 = time.time()
