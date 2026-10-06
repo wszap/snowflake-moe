@@ -485,6 +485,19 @@ def main():
 
     ce, cp, cu, ct, es, df = train_one(cell, train_ids, val_ids, vocab_size,
                                        "CellMoE", True)
+    # ---- 路由调制监控：mem_gate/assembly ratio（验收指标之二）----
+    ratios = []
+    for layer in cell.layers:
+        for c in layer.cells:
+            if getattr(c, '_ratios', None):
+                ratios.extend(c._ratios)
+    if ratios:
+        last_vals = []
+        for layer in cell.layers:
+            for c in layer.cells:
+                last_vals.append(round(c._ratios[-1], 4) if c._ratios else 0.0)
+        print(f"[S5] mem_gate/assembly ratio mean={sum(ratios) / len(ratios):.4f} "
+              f"(samples={len(ratios)}) last_per_cell={last_vals}", flush=True)
     os.makedirs(os.path.dirname(CKPT_PATH), exist_ok=True)
     torch.save({"state_dict": cell.state_dict(),
                 "cfg": dict(d=128, vocab_size=vocab_size, n_cells=4,
