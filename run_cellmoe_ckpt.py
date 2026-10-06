@@ -38,7 +38,7 @@ MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 �
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
-LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 0.05, 0.05, 0.05
+LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 1e-3, 1e-3, 1e-3  # 锁3：熵正则+均衡loss权重（老板指示 1e-3 起试，待把关）
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
@@ -440,6 +440,9 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                     gate_ent = -(gate * (gate + 1e-9).log()).sum(-1).mean()
                     loss = (ce_loss - LAMBDA_ENT * (ent_sum / nc + 0.25 * gate_ent)
                             + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ORG * (org_sum / nc))
+                    router_ent = (ent_sum / nc).item()   # 锁3监控：weights 熵（期望随正则上升）
+                else:
+                    router_ent = 0.0
 
             t0 = time.time()
             loss.backward()
@@ -471,7 +474,8 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                       f"opt={w_opt / w_n * 1000:.1f}ms "
                       f"loss={e_sum / e_n:.4f} util={u}% temp={temp}C "
                       f"lr={opt.param_groups[0]['lr']:.2e} "
-                      f"mem_lr={opt.param_groups[1]['lr']:.2e}", flush=True)
+                      f"mem_lr={opt.param_groups[1]['lr']:.2e} "
+                      f"router_ent={router_ent:.4f}", flush=True)
                 if temp is not None and temp >= GPU_TEMP_MAX:
                     print(f"[S5] GPU temp {temp}C >= {GPU_TEMP_MAX}C，暂停 20s 降温",
                           flush=True)
