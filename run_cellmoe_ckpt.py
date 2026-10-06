@@ -39,6 +39,8 @@ EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epo
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
 LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 0.05, 0.05, 0.05
+# ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
+MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
 OUT_CSV = os.path.abspath(os.path.join(BASE, "..", "output",
                                        "results_tinystories_ckpt.csv"))
@@ -364,7 +366,8 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
     # 数据预加载到 GPU：训练前一次性搬运，避免每步 CPU→GPU 拷贝
     train_ids = train_ids.to(DEVICE)
     val_ids = val_ids.to(DEVICE)
-    # ---- 锁14/19：分组 lr（细胞器 3e-4，忆点 3e-5=小10倍，其余默认 3e-4）----
+    # ---- 锁14/19：分组 lr（细胞器 3e-4，其余默认 3e-4）----
+    # ---- 锁20：忆点+route_proj lr 回调 3e-5 -> 1e-4（消除 ratio 1428x 饿死）----
     organelle_params = [p for n, p in model.named_parameters()
                         if "W1" in n or "W2" in n]
     memory_params = [p for n, p in model.named_parameters()
@@ -374,7 +377,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                            or "memory" in n or "route_proj" in n)]
     opt = torch.optim.Adam([
         {"params": organelle_params, "lr": LR, "base_lr": LR},
-        {"params": memory_params, "lr": LR / 10, "base_lr": LR / 10},
+        {"params": memory_params, "lr": MEM_LR, "base_lr": MEM_LR},
         {"params": rest_params, "lr": LR, "base_lr": LR},
     ], fused=True)
     n_steps = max(1, train_ids.numel() // (SEQ_LEN * BATCH_SIZE))
