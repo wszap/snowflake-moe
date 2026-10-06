@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """阶段五（快速版）：TinyStories 100MB 扩展性验证
 - 与 run_stage5.py 完全同超参/同 seed/同数据，仅将串行 Organelle 前向
   改为并行 einsum（数学等价，PyTorch 纯实现优化，不改架构）
@@ -39,7 +39,15 @@ EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epo
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
 TOPK_ORG = 4  # 锁3.7：org_sum 归一化除数（与模型 topk_organelle=4 一致）
-LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG = 0.01, 0.03, 0.05   # 锁3.7.2：MEM 沿用 0.01；单样本低熵自信正则 0.03（0.1 与 0.01 之间精调，目标 router_ent 1.2~1.6 黄金区间）；org_sum 归一化频次权重 0.05
+LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.01, 0.05, 0.05, 0.05   # 锁3.8：ENT 回落 0.05 基线（0.03 与 0.1 折中）；org_sum 归一化频次权重 0.05；KD 蒸馏项 0.05 起步
+# ---- 锁3.8：分层结构先验 bias（route_proj 输出后加，浅/中/深层强制不同样本分布）----
+# L=4 层 x 8 organelle：浅层偏向前段 organelle，中层中段，深层后段（软先验，可训练微调）
+LAYER_BIASES = [
+    [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   # L0 浅层：偏 organelle 0/1
+    [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],   # L1 浅中：偏 organelle 2/3
+    [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],   # L2 中深：偏 organelle 4/5
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0],   # L3 深层：偏 organelle 6/7
+]
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
@@ -57,7 +65,7 @@ class FastCellMoE(nn.Module):
     """等价 ImprovedCellMoE：organelles 用 einsum 并行，其余逻辑一致。"""
 
     def __init__(self, d, n_organelles=8, n_memory=32, topk=4,
-                 memory_read_scale=1.0, h=32):
+                 memory_read_scale=1.0, h=32, layer_bias=None):
         super().__init__()
         self.d = d
         self.n_organelles = n_organelles
@@ -75,6 +83,11 @@ class FastCellMoE(nn.Module):
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
         self.route_proj = nn.Linear(self.d, n_organelles, bias=False)
         nn.init.normal_(self.route_proj.weight, std=0.02)
+        # 锁3.8：分层结构先验 bias（route_proj 输出后加），强制不同层细胞器偏向不同样本分布
+        if layer_bias is not None:
+            self.layer_bias = nn.Parameter(torch.tensor(layer_bias, dtype=torch.float32))
+        else:
+            self.layer_bias = nn.Parameter(torch.zeros(n_organelles))
         self.group_w = nn.Parameter(torch.tensor([0.5]))
         self.head = nn.Linear(d, d, bias=False)
         self.last_topk = None
@@ -116,7 +129,7 @@ class FastCellMoE(nn.Module):
         self.memory_attn = attn.detach()
         assembly = attn @ asm                                    # [B, N]
         mem_features = attn @ val                                # [B, d]
-        mem_gate = self.route_proj(mem_features)                 # [B, N] ← 忆点调制路由
+        mem_gate = self.route_proj(mem_features) + self.layer_bias   # [B, N] ← 忆点调制路由 + 锁3.8分层先验
         if self.training:
             # 锁3.6：Gumbel 噪声 tau 降至 0.5（1.0 过早锁定幸运细胞），鼓励平缓探索；eval 不加保持确定性
             logits = assembly + mem_gate
@@ -148,14 +161,14 @@ class FastHierCellMoE(nn.Module):
     """等价 ImprovedHierarchicalCellMoE：n_cells 细胞 + 二级 gate + topk_cell。"""
 
     def __init__(self, d, n_cells=4, n_organelles=8, n_memory=32,
-                 topk_organelle=4, topk_cell=2):
+                 topk_organelle=4, topk_cell=2, layer_bias=None):
         super().__init__()
         self.d = d
         self.n_cells = n_cells
         self.topk_cell = topk_cell
         self.cells = nn.ModuleList([
             FastCellMoE(d, n_organelles=n_organelles, n_memory=n_memory,
-                        topk=topk_organelle)
+                        topk=topk_organelle, layer_bias=layer_bias)
             for _ in range(n_cells)
         ])
         self.encoder = nn.Linear(d, d, bias=False)
@@ -181,15 +194,21 @@ class FastHierCellMoE(nn.Module):
         gate_sparse.scatter_(1, topk_idx, topk_w)
         out = (gate_sparse.unsqueeze(-1) * cell_outs).sum(dim=1)
         entropy = None  # 无消费方，删除以消除每步 .item() 同步
+        # ---- 锁3.8：知识蒸馏——好学生 cell1 教中等生/差生（特征对齐，teacher detach）----
+        kd_loss = None
+        if self.training:
+            teacher = cell_outs[:, 1].detach()                  # 好学生 cell1 特征 [B, d]
+            kd_loss = ((cell_outs - teacher.unsqueeze(1)).pow(2).mean(dim=-1))  # [B, n_cells]
+            kd_loss = kd_loss[:, [0, 2, 3]].mean()              # 除 cell1 外：中等生+差生学 teacher
         return out, {"gate": gate, "gate_entropy": entropy,
-                     "cell_infos": cell_infos}
+                     "cell_infos": cell_infos, "kd_loss": kd_loss}
 
 
 class FastHierLM(nn.Module):
     """等价 ImprovedHierarchicalCellMoE_LM。"""
 
     def __init__(self, d, vocab_size, n_cells=4, n_organelles=8, n_memory=32,
-                 topk_organelle=4, topk_cell=2, L=4):
+                 topk_organelle=4, topk_cell=2, L=4, layer_biases=None):
         super().__init__()
         self.d = d
         self.vocab_size = vocab_size
@@ -198,19 +217,26 @@ class FastHierLM(nn.Module):
         self.layers = nn.ModuleList([
             FastHierCellMoE(d, n_cells=n_cells, n_organelles=n_organelles,
                             n_memory=n_memory, topk_organelle=topk_organelle,
-                            topk_cell=topk_cell)
-            for _ in range(L)
+                            topk_cell=topk_cell,
+                            layer_bias=(layer_biases[i] if layer_biases else None))
+            for i in range(L)
         ])
         self.head = nn.Linear(d, vocab_size)
 
     def forward(self, tokens):
         x = self.in_proj(self.embed(tokens))
         info = None
+        kd_loss = None
         for layer in self.layers:
             B, T, d = x.shape
             y, li = layer(x.reshape(B * T, d))
             info = li if info is None else info
+            if li.get("kd_loss") is not None:
+                kd_loss = li["kd_loss"] if kd_loss is None else kd_loss + li["kd_loss"]
             x = y.reshape(B, T, d)
+        if kd_loss is not None:
+            kd_loss = kd_loss / len(self.layers)
+            info = {**info, "kd_loss": kd_loss}
         return self.head(x), info
 
 
@@ -449,14 +475,20 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                         f = f_hard + (f_soft - f_soft.detach())               # STE
                         org_sum += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，全压→N/topk=2
                     nc = len(cell_infos)
+                    kd_loss = info.get('kd_loss')
+                    kd_val = (kd_loss.item() if kd_loss is not None else 0.0)
                     # 锁3.7：单样本低熵自信正则（+LAMBDA_ENT*ent_sum，惩罚犹豫/鼓励果断）
                     # + 归一化 org_sum 跨样本均衡（0.05）+ MEM 忆点覆盖（0.01）
+                    # 锁3.8：+ KD 蒸馏项（好学生 cell1 教中等生/差生，LAMBDA_KD=0.05）
                     loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ENT * (ent_sum / nc) + LAMBDA_ORG * (org_sum / nc)
+                    if kd_loss is not None:
+                        loss = loss + LAMBDA_KD * kd_loss
                     router_ent = (ent_sum / nc).item()    # 锁3.7监控：单样本 weights 熵（目标 1.2~1.6，不能<1.0）
                     org_sum_val = (org_sum / nc).item()   # 锁3.7监控：归一化频次均衡度（均匀=1，全压=2，目标 1.5~2.0）
                 else:
                     router_ent = 0.0
                     org_sum_val = 0.0
+                    kd_val = 0.0
 
             t0 = time.time()
             loss.backward()
@@ -489,7 +521,8 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                       f"loss={e_sum / e_n:.4f} util={u}% temp={temp}C "
                       f"lr={opt.param_groups[0]['lr']:.2e} "
                       f"mem_lr={opt.param_groups[1]['lr']:.2e} "
-                      f"router_ent={router_ent:.4f} org_sum={org_sum_val:.4f}", flush=True)
+                      f"router_ent={router_ent:.4f} org_sum={org_sum_val:.4f} "
+                      f"kd={kd_val:.4f}", flush=True)
                 if temp is not None and temp >= GPU_TEMP_MAX:
                     print(f"[S5] GPU temp {temp}C >= {GPU_TEMP_MAX}C，暂停 20s 降温",
                           flush=True)
@@ -546,7 +579,8 @@ def main():
           f"train={train_ids.numel()} val={val_ids.numel()}")
 
     cell = FastHierLM(d=128, vocab_size=vocab_size, n_cells=4, n_organelles=8,
-                      n_memory=32, topk_organelle=4, topk_cell=2, L=4).to(DEVICE)
+                      n_memory=32, topk_organelle=4, topk_cell=2, L=4,
+                      layer_biases=LAYER_BIASES).to(DEVICE)
     n_cell_params = count_params(cell)
     print(f"[S5] CellMoE params={n_cell_params} (Fixed 延后一轮再跑)")
 
