@@ -38,7 +38,8 @@ MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 �
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
-LAMBDA_MEM, LAMBDA_ORG = 0.01, 0.1   # 锁3.6：MEM 均衡沿用 0.01；org_sum STE 频次权重 0.1（放大对抗 ce_loss 对单 cell 偏爱）；熵正则已删除
+TOPK_ORG = 4  # 锁3.7：org_sum 归一化除数（与模型 topk_organelle=4 一致）
+LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG = 0.01, 0.01, 0.05   # 锁3.7：MEM 沿用 0.01；单样本低熵自信正则 0.01（最小化熵=果断路由）；org_sum 归一化频次权重 0.05
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
@@ -436,23 +437,23 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                     ent_sum = mem_sum = org_sum = 0.0
                     for ci in cell_infos:
                         w = ci['weights']
-                        ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()   # 仅监控：router_ent
+                        ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()   # 单样本熵：锁3.7 起参与 loss（低熵自信）
                         mu = ci['memory_attn'].mean(dim=0)
                         mem_sum += (mu * mu).sum() * mu.shape[-1]
-                        # 锁3.6：org_sum 用带 STE 的真实使用频次，惩罚"单个专家被极度依赖"
-                        # forward 值=f_hard（topk one-hot 均值，真实频次）；梯度经 f_soft 可导路径回传
-                        f_soft = ci['weights'].mean(dim=0)                    # [N]，可导概率均值
+                        # 锁3.7：org_sum 归一化修正——f_hard/topk，均匀=1、全压=N/topk=2
+                        # （锁3.6 未归一化导致 topk=4 时均匀下界=16、梯度恒零、全员平庸）
+                        f_soft = ci['weights'].mean(dim=0) / TOPK_ORG          # [N]，可导概率均值（归一化）
                         one_hot = torch.zeros_like(ci['weights'])
                         one_hot.scatter_(1, ci['topk_idx'], 1.0)              # [B, N] 真实选择
-                        f_hard = one_hot.mean(dim=0)                          # [N]，真实使用频次
+                        f_hard = one_hot.mean(dim=0) / TOPK_ORG               # [N]，真实使用频次（归一化）
                         f = f_hard + (f_soft - f_soft.detach())               # STE
-                        org_sum += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，单专家→N
+                        org_sum += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，全压→N/topk=2
                     nc = len(cell_infos)
-                    # 锁3.6：删除熵正则项（原 -LAMBDA_ENT*(ent_sum/nc + 0.25*gate_ent)），
-                    # org_sum 以 LAMBDA_ORG=0.1（STE 频次版）加回 loss
-                    loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ORG * (org_sum / nc)
-                    router_ent = (ent_sum / nc).item()    # 锁3.6监控：weights 熵（目标 1.2~1.6，不能<1.0）
-                    org_sum_val = (org_sum / nc).item()   # 锁3.6监控：STE 频次均衡度（目标 1.5~3.0，不能 1.0/8.0）
+                    # 锁3.7：单样本低熵自信正则（+LAMBDA_ENT*ent_sum，惩罚犹豫/鼓励果断）
+                    # + 归一化 org_sum 跨样本均衡（0.05）+ MEM 忆点覆盖（0.01）
+                    loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ENT * (ent_sum / nc) + LAMBDA_ORG * (org_sum / nc)
+                    router_ent = (ent_sum / nc).item()    # 锁3.7监控：单样本 weights 熵（目标 1.2~1.6，不能<1.0）
+                    org_sum_val = (org_sum / nc).item()   # 锁3.7监控：归一化频次均衡度（均匀=1，全压=2，目标 1.5~2.0）
                 else:
                     router_ent = 0.0
                     org_sum_val = 0.0
