@@ -13,6 +13,7 @@ import gc
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -43,6 +44,9 @@ OUT_CSV = os.path.abspath(os.path.join(BASE, "..", "output",
                                        "results_tinystories_ckpt.csv"))
 CKPT_PATH = os.path.abspath(os.path.join(BASE, "checkpoints",
                                         "cellmoe_tinystories.pt"))
+# ---- 锁10：文档边界切分（修复验证集泄漏）----
+SEP = "<|endoftext|>"      # TinyStories 文档分隔符
+STORY_STARTS = None        # 全局：训练合法起点列表 [(s, e_lim)]，由 load_tinystories 填充
 
 
 # ---------------- 并行 Organelle（等价于 8 个串行 MLP(d->32->d)） ----------------
@@ -234,7 +238,8 @@ class FixedFFN_LM(nn.Module):
 # ---------------- 数据 ----------------
 def load_tinystories(path=DATA, val_frac=0.1, seed=2026, use_mb=25):
     """快速加载：文件为纯 ASCII 文本时用 numpy 批量映射（比逐字符快 100x）。
-    use_mb>0 时截取前 use_mb MB 数据（保持 5 epoch 完整训练）。"""
+    use_mb>0 时截取前 use_mb MB 数据（保持 5 epoch 完整训练）。
+    锁10：按文档边界切分（<|endoftext|> 或双换行），前 90% 文档训练、后 10% 验证。"""
     with open(path, "rb") as f:
         raw = f.read()
     if use_mb:
@@ -247,18 +252,45 @@ def load_tinystories(path=DATA, val_frac=0.1, seed=2026, use_mb=25):
         lut[:] = -1
         for i, c in enumerate(chars):
             lut[ord(c)] = i
-        arr = lut[np.frombuffer(raw, dtype=np.uint8)]
-        if (arr < 0).any():
-            raise ValueError("non-ASCII bytes found, fallback needed")
-        data = torch.from_numpy(arr.astype(np.int64))
     else:
-        stoi = {c: i for i, c in enumerate(chars)}
-        data = torch.tensor([stoi[c] for c in text], dtype=torch.long)
-    n_val = int(data.numel() * val_frac)
-    rng = random.Random(seed)
-    val_start = rng.randint(0, data.numel() - n_val - 1)
-    val_ids = data[val_start:val_start + n_val]
-    train_ids = torch.cat([data[:val_start], data[val_start + n_val:]])
+        lut = None
+
+    # ---- 锁10：按文档边界切分（非随机），分隔符 <|endoftext|> 或双换行 ----
+    doc_parts = re.split(r"(?:<\|endoftext\|>|\n\s*\n)", text)
+    docs = [p.strip("\n") for p in doc_parts if p.strip("\n")]
+    n_val_docs = max(1, int(len(docs) * val_frac))
+    train_docs = docs[:len(docs) - n_val_docs]
+    val_docs = docs[len(docs) - n_val_docs:]
+
+    def encode_docs(doc_list):
+        if lut is not None:
+            parts = []
+            for doc in doc_list:
+                b = doc.encode("utf-8")
+                a = lut[np.frombuffer(b, dtype=np.uint8)]
+                if (a < 0).any():
+                    raise ValueError("non-ASCII bytes found, fallback needed")
+                parts.append(torch.from_numpy(a.astype(np.int64)))
+        else:
+            stoi = {c: i for i, c in enumerate(chars)}
+            parts = [torch.tensor([stoi[c] for c in doc], dtype=torch.long)
+                     for doc in doc_list]
+        if not parts:
+            return torch.zeros(0, dtype=torch.long)
+        return torch.cat(parts)
+
+    train_ids = encode_docs(train_docs)
+    val_ids = encode_docs(val_docs)
+
+    # 填充全局 STORY_STARTS：训练文档合法起点（供后续避免跨文档采样使用）
+    global STORY_STARTS
+    STORY_STARTS = []
+    offset = 0
+    for doc in train_docs:
+        dlen = len(doc.encode("utf-8")) if lut is not None else len(doc)
+        if dlen > 1:
+            STORY_STARTS.append((offset, offset + dlen - 1))
+        offset += dlen
     return vocab_size, train_ids, val_ids, chars
 
 
