@@ -65,19 +65,46 @@ class FastCellMoE(nn.Module):
         self.memory_keys = nn.Parameter(torch.randn(n_memory, d) * 0.1)
         self.memory_assembly = nn.Parameter(torch.zeros(n_memory, n_organelles))
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
+        self.group_w = nn.Parameter(torch.tensor([0.5]))
         self.head = nn.Linear(d, d, bias=False)
         self.last_topk = None
         self.memory_attn = None
+        self.new_memory_keys = None
+        self.new_memory_assembly = None
+        self.new_memory_value = None
 
     def forward(self, x):
         v = self.norm(self.encoder(x))                          # [B, d]
-        sim = v @ self.memory_keys.T / (self.d ** 0.5)          # [B, n_mem]
-        if self.training:
-            attn = F.gumbel_softmax(sim, tau=1.0, hard=False, dim=-1)
+        if self.new_memory_keys is None:
+            keys = self.memory_keys
+            asm = self.memory_assembly
+            val = self.memory_value
+            n_old = None
         else:
-            attn = F.softmax(sim / 1.0, dim=-1)
+            keys = torch.cat([self.memory_keys, self.new_memory_keys], dim=0)
+            asm = torch.cat([self.memory_assembly, self.new_memory_assembly], dim=0)
+            val = torch.cat([self.memory_value, self.new_memory_value], dim=0)
+            n_old = self.memory_keys.shape[0]
+        sim = v @ keys.T / (self.d ** 0.5)                      # [B, n_mem]
+        if self.new_memory_keys is not None:
+            # 分组 softmax：old / new 分别归一化（对齐 FastCellMoE_L / ImprovedCellMoE）
+            sim_old, sim_new = sim[:, :n_old], sim[:, n_old:]
+            if self.training:
+                a_old = F.gumbel_softmax(sim_old, tau=1.0, hard=False, dim=-1)
+                a_new = F.gumbel_softmax(sim_new, tau=1.0, hard=False, dim=-1)
+            else:
+                a_old = F.softmax(sim_old / 1.0, dim=-1)
+                a_new = F.softmax(sim_new / 1.0, dim=-1)
+            w_old = torch.sigmoid(self.group_w)
+            attn = torch.cat([w_old * a_old, (1 - w_old) * a_new], dim=-1)
+            attn = attn / attn.sum(-1, keepdim=True).clamp_min(1e-9)
+        else:
+            if self.training:
+                attn = F.gumbel_softmax(sim, tau=1.0, hard=False, dim=-1)
+            else:
+                attn = F.softmax(sim / 1.0, dim=-1)
         self.memory_attn = attn.detach()
-        assembly = attn @ self.memory_assembly                  # [B, N]
+        assembly = attn @ asm                                    # [B, N]
         weights = F.softmax(assembly, dim=-1)
         topk_w, topk_idx = torch.topk(weights, self.topk, dim=-1)
         topk_w = topk_w / topk_w.sum(-1, keepdim=True).clamp_min(1e-9)
@@ -88,7 +115,7 @@ class FastCellMoE(nn.Module):
         w3 = topk_w.unsqueeze(-1)
         idx3 = topk_idx.unsqueeze(-1).expand(-1, -1, self.d)
         out = (org_out.gather(1, idx3) * w3).sum(1)             # [B, d]
-        out = out + self.memory_read_scale * (attn @ self.memory_value)
+        out = out + self.memory_read_scale * (attn @ val)
         self.last_topk = topk_idx.detach()
         out = self.head(out)
         return out, {"weights": weights, "memory_attn": attn, "topk_idx": topk_idx}
