@@ -56,7 +56,7 @@ class FastCellMoE(nn.Module):
         self.n_organelles = n_organelles
         self.n_memory = n_memory
         self.topk = topk
-        self.memory_read_scale = memory_read_scale
+        self.memory_read_scale = nn.Parameter(torch.tensor(float(memory_read_scale)))
         self.encoder = nn.Linear(d, d, bias=False)
         self.norm = nn.LayerNorm(d)
         # 8 个 Organelle 权重合并（等价钱：x->W1[.,h] SiLU ->W2[.,d]）
@@ -115,6 +115,12 @@ class FastCellMoE(nn.Module):
         w3 = topk_w.unsqueeze(-1)
         idx3 = topk_idx.unsqueeze(-1).expand(-1, -1, self.d)
         out = (org_out.gather(1, idx3) * w3).sum(1)             # [B, d]
+        # 监控（可选，不影响梯度）
+        if not hasattr(self, '_ratios'):
+            self._ratios = []
+        self._ratios.append(((attn @ val).norm() / (out.norm() + 1e-9)).item())
+        if len(self._ratios) > 1000:
+            self._ratios = self._ratios[-500:]
         out = out + self.memory_read_scale * (attn @ val)
         self.last_topk = topk_idx.detach()
         out = self.head(out)
