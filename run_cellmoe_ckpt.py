@@ -433,8 +433,14 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                         ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()
                         mu = ci['memory_attn'].mean(dim=0)
                         mem_sum += (mu * mu).sum() * mu.shape[-1]
-                        fs = w.mean(dim=0)
-                        org_sum += (fs * fs).sum() * w.shape[-1]
+                        # 锁3修正：org_sum 改用 topk 实际选择频率
+                        # （softmax 概率均值可被压平"欺骗"：熵大但 topk 仍固定选几个）
+                        # 梯度断在 topk（离散），均衡信号走频率路线，与熵正则（softmax 路线）分离
+                        tidx = ci['topk_idx'].reshape(-1)         # [B*topk]
+                        f = torch.zeros(w.shape[-1], device=tidx.device)
+                        f.scatter_add_(0, tidx, torch.ones_like(tidx, dtype=torch.float))
+                        f = f / tidx.numel()                      # 归一化到概率
+                        org_sum += (f * f).sum() * w.shape[-1]
                     nc = len(cell_infos)
                     gate = info['gate']
                     gate_ent = -(gate * (gate + 1e-9).log()).sum(-1).mean()
