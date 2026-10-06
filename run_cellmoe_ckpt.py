@@ -65,6 +65,8 @@ class FastCellMoE(nn.Module):
         self.memory_keys = nn.Parameter(torch.randn(n_memory, d) * 0.1)
         self.memory_assembly = nn.Parameter(torch.zeros(n_memory, n_organelles))
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
+        self.route_proj = nn.Linear(self.d, n_organelles, bias=False)
+        nn.init.normal_(self.route_proj.weight, std=0.02)
         self.group_w = nn.Parameter(torch.tensor([0.5]))
         self.head = nn.Linear(d, d, bias=False)
         self.last_topk = None
@@ -105,7 +107,9 @@ class FastCellMoE(nn.Module):
                 attn = F.softmax(sim / 1.0, dim=-1)
         self.memory_attn = attn.detach()
         assembly = attn @ asm                                    # [B, N]
-        weights = F.softmax(assembly, dim=-1)
+        mem_features = attn @ val                                # [B, d]
+        mem_gate = self.route_proj(mem_features)                 # [B, N] ← 忆点调制路由
+        weights = F.softmax(assembly + mem_gate, dim=-1)
         topk_w, topk_idx = torch.topk(weights, self.topk, dim=-1)
         topk_w = topk_w / topk_w.sum(-1, keepdim=True).clamp_min(1e-9)
         # 并行 organelle 前向：x -> [B, N, h] -> SiLU -> [B, N, d]
@@ -115,13 +119,12 @@ class FastCellMoE(nn.Module):
         w3 = topk_w.unsqueeze(-1)
         idx3 = topk_idx.unsqueeze(-1).expand(-1, -1, self.d)
         out = (org_out.gather(1, idx3) * w3).sum(1)             # [B, d]
-        # 监控（可选，不影响梯度）
+        # 监控（可选，不影响梯度）：忆点对路由的贡献
         if not hasattr(self, '_ratios'):
             self._ratios = []
-        self._ratios.append(((attn @ val).norm() / (out.norm() + 1e-9)).item())
+        self._ratios.append((mem_gate.norm() / (assembly.norm() + 1e-9)).item())
         if len(self._ratios) > 1000:
             self._ratios = self._ratios[-500:]
-        out = out + self.memory_read_scale * (attn @ val)
         self.last_topk = topk_idx.detach()
         out = self.head(out)
         return out, {"weights": weights, "memory_attn": attn, "topk_idx": topk_idx}
