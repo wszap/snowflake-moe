@@ -4,12 +4,12 @@ A lightweight Sparse Mixture-of-Experts (MoE) language model with compositional 
 
 ## Project Intro
 
-Snowflake MoE is a from-scratch implementation of a sparse MoE architecture that combines fine-grained expert routing with a shared-expert "memory point" mechanism, enabling **compositional generalization**, **targeted memory erasure**, and **lifelong learning** in a compact parameter budget.
+Snowflake MoE is a from-scratch implementation of a sparse MoE architecture that combines fine-grained expert wiring with a shared-expert "memory point" mechanism, enabling **compositional generalization**, **targeted memory erasure**, and **lifelong learning** in a compact parameter budget.
 
 ## Core Contributions
 
-1. **Compositional MoE (组合 MoE)**: Fine-grained experts + shared experts + sparse activation routing. The router learns to compose reusable expert combinations, achieving strong generalization under a fraction of the parameters of a dense baseline.
-2. **Memory Points (忆点)**: A dedicated memory-value slot mechanism that stores decoupled factual knowledge, separate from routing weights.
+1. **Compositional MoE (组合 MoE)**: Fine-grained experts + shared experts + sparse activation wiring. The wiring learns to compose reusable expert combinations, achieving strong generalization under a fraction of the parameters of a dense baseline.
+2. **Memory Points (忆点)**: A dedicated memory-value slot mechanism that stores decoupled factual knowledge, separate from wiring weights.
 3. **Erasable Memory (可擦除)**: Memory values can be selectively erased at inference time. Erasing 50% of memory slots causes only mild PPL degradation, while erasing 100% degrades the model significantly — demonstrating that knowledge is localized and erasable on demand.
 4. **Lifelong Learning (终身学习)**: New domains can be added with negligible regression on previously learned domains.
 
@@ -57,7 +57,7 @@ python run_stage3.py
 python run_stage4.py
 python run_stage5.py
 
-# MNIST routing-behavior ablation (fixed / rules / learned)
+# MNIST wiring-behavior ablation (fixed / rules / learned)
 python train_mnist.py
 
 # LM scaling & ablation sweep

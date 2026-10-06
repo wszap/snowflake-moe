@@ -4,20 +4,20 @@ A record of how the project evolved from initial experiments to the stable archi
 
 ## Stage 1: Baseline Sparse MoE
 
-- First from-scratch MoE: fine-grained experts + top-k routing.
-- Learned a dense-ish gate; suffered from load imbalance and router collapse.
+- First from-scratch MoE: fine-grained experts + top-k wiring.
+- Learned a dense-ish gate; suffered from load imbalance and wiring collapse.
 - Scripts: `run_stage1.py`.
 
 ## Stage 2: Shared Expert + Memory Points
 
 - Introduced a shared expert that all tokens attend to, acting as a "memory point".
-- Decoupled factual storage (memory values) from routing weights.
+- Decoupled factual storage (memory values) from wiring weights.
 - Scripts: `run_stage2.py`.
 
-## Stage 3: Compositional Routing
+## Stage 3: Compositional Wiring
 
 - Combined fine-grained experts with sparse activation and a composition bonus.
-- The router learned to compose expert subsets, improving OOD generalization.
+- The wiring learned to compose expert subsets, improving OOD generalization.
 - Scripts: `run_stage3.py`.
 
 ## Stage 4: Erasable Memory

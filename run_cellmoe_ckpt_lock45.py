@@ -78,13 +78,13 @@ DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_ti
 
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
 
-TOPK_ORG = 4  # 锁3.7：org_sum 归一化除数（与模型 topk_organelle=4 一致）
+TOPK_ORG = 4  # 锁3.7：connection_strength 归一化除数（与模型 topk_organelle=4 一致）
 
-LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.05, 0.0, 0.05, 0.0   # 锁3.8：ENT 回落 0.05 基线（0.03 与 0.1 折中）；org_sum 归一化频次权重 0.05；KD 蒸馏项 0.05 起步
+LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.05, 0.0, 0.05, 0.0   # 锁3.8：ENT 回落 0.05 基线（0.03 与 0.1 折中）；connection_strength 归一化频次权重 0.05；KD 蒸馏项 0.05 起步
 
-# ---- 锁4.0：内容寻址路由（在双向熵控制保护下）----
+# ---- 锁4.0：内容寻址接线（在双向熵控制保护下）----
 
-# 每个细胞器自带可学习 query（organelle_query），样本 v 与 query 点积竞标路由：
+# 每个细胞器自带可学习 query（organelle_query），样本 v 与 query 点积竞标接线：
 
 # query_logits = (v @ organelle_query.T) / sqrt(d)；logits = query_logits + mem_gate（忆点上下文保留）
 
@@ -94,7 +94,7 @@ LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.05, 0.0, 0.05, 0.0   # 锁3.8�
 
 # loss_ent_ctrl = LAMBDA_ENT_CTRL * (current_ent - TARGET_ENT)^2，current_ent=(ent_sum/nc).detach()
 
-TARGET_ENT = 1.4          # 目标路由熵（黄金区间 1.2~1.6 中值）
+TARGET_ENT = 1.4          # 目标接线熵（黄金区间 1.2~1.6 中值）
 
 LAMBDA_ENT_CTRL = 0.05    # 双向熵控制权重
 
@@ -196,15 +196,15 @@ class FastCellMoE(nn.Module):
 
         nn.init.normal_(self.route_proj.weight, std=0.02)
 
-        # 锁4.3：拼专家——mix_proj 在忆点特征上生成混合系数（参数空间合成临时专家）
+        # 锁4.3：拼专家——wire_proj 在忆点特征上生成接线系数（参数空间合成临时专家）
 
         # route_proj / organelle_query / layer_bias 定义保留以便回滚，但 forward 不再使用
 
-        self.mix_proj = nn.Linear(self.d * 2, n_organelles, bias=False)   # 锁4.5：输入 d -> 2d（x + mem_features）
+        self.wire_proj = nn.Linear(self.d * 2, n_organelles, bias=False)   # 锁4.5：输入 d -> 2d（x + mem_features）
 
-        nn.init.normal_(self.mix_proj.weight, std=0.1)  # 锁4.4：std 0.02->0.1（mem_features 量级小，避免输出压平）
+        nn.init.normal_(self.wire_proj.weight, std=0.1)  # 锁4.4：std 0.02->0.1（mem_features 量级小，避免输出压平）
 
-        # 锁4.0：细胞器查询向量（内容寻址）——每个细胞器的"自我介绍牌"，与样本 v 点积竞标路由
+        # 锁4.0：细胞器查询向量（内容寻址）——每个细胞器的"自我介绍牌"，与样本 v 点积竞标接线
 
         self.organelle_query = nn.Parameter(torch.randn(self.n_organelles, self.d) * 0.02)
 
@@ -301,12 +301,12 @@ class FastCellMoE(nn.Module):
 
         mem_features = attn @ val                                # [B, d]
 
-        # 锁4.3：拼专家——忆点特征生成混合系数，在参数空间合成临时专家（废除 TopK 选器官）
+        # 锁4.3：拼专家——忆点特征生成接线系数，在参数空间合成临时专家（废除 TopK 选器官）
 
-        # 锁4.5：拆瓶颈——mix_proj 输入改为 cat([x, mem_features])，维度 d -> 2d（x 提供样本区分信号，mem_features 保留参与）
-        mix_input = torch.cat([x, mem_features], dim=-1)          # [B, 2d]
+        # 锁4.5：拆瓶颈——wire_proj 输入改为 cat([x, mem_features])，维度 d -> 2d（x 提供样本区分信号，mem_features 保留参与）
+        wiring_input = torch.cat([x, mem_features], dim=-1)          # [B, 2d]
 
-        mix = F.softmax(self.mix_proj(mix_input), dim=-1)         # [B, n_org]
+        wiring = F.softmax(self.wire_proj(wiring_input), dim=-1)         # [B, n_org]
 
         # 锁4.5：base + delta 合成器官权重（通用端口 0/1 + 专属端口 2~7）
         W1_all = self.W1_base.unsqueeze(0) + self.W1_delta        # [n_org, d, h]
@@ -314,15 +314,15 @@ class FastCellMoE(nn.Module):
 
         # 在参数空间合成临时专家（避免物化 [B,d,h] 大张量）
 
-        h = torch.einsum('bi,idh,bd->bh', mix, W1_all, x)         # [B, h]
+        h = torch.einsum('bi,idh,bd->bh', wiring, W1_all, x)         # [B, h]
 
         h = F.silu(h)
 
-        out = torch.einsum('bi,ihd,bh->bd', mix, W2_all, h)       # [B, d]
+        out = torch.einsum('bi,ihd,bh->bd', wiring, W2_all, h)       # [B, d]
 
         out = self.head(out)
 
-        return out, {"mix": mix, "memory_attn": attn, "mem_features": mem_features}
+        return out, {"wiring": wiring, "memory_attn": attn, "mem_features": mem_features}
 
 
 
@@ -832,7 +832,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
     memory_params = [p for n, p in model.named_parameters()
 
-                     if "memory" in n or "route_proj" in n or "mix_proj" in n]
+                     if "memory" in n or "route_proj" in n or "wire_proj" in n]
 
     rest_params = [p for n, p in model.named_parameters()
 
@@ -840,7 +840,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                            or "memory" in n or "route_proj" in n
 
-                           or "mix_proj" in n)]
+                           or "wire_proj" in n)]
 
     opt = torch.optim.Adam([
 
@@ -868,7 +868,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
 
 
-    # ---- 锁4.5 诊断：mem_features 数值分化检查（训练前一次 forward，只读不改） ----
+    # ---- 锁4.5 诊断：mem_features 数值正常电路检查（训练前一次 forward，只读不改） ----
     with torch.no_grad():
         xb_diag, _ = lm_batch(train_ids, BATCH_SIZE, SEQ_LEN, seed=0)
         _, info_diag = model(xb_diag)
@@ -959,7 +959,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                     mem_sum = 0.0
 
-                    mix_ent_sum = 0.0
+                    wiring_ent_sum = 0.0
 
                     for ci in cell_infos:
 
@@ -967,9 +967,9 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                         mem_sum += (mu * mu).sum() * mu.shape[-1]
 
-                        m = ci['mix']
+                        m = ci['wiring']
 
-                        mix_ent_sum += -(m * (m + 1e-9).log()).sum(-1).mean()
+                        wiring_ent_sum += -(m * (m + 1e-9).log()).sum(-1).mean()
 
                     nc = len(cell_infos)
 
@@ -977,7 +977,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                     kd_val = (kd_loss.item() if kd_loss is not None else 0.0)
 
-                    # 锁4.3：拼专家——loss 只保留 ce + LAMBDA_MEM*mem_sum（删 ent_ctrl/org_sum/orth_sum）
+                    # 锁4.3：拼专家——loss 只保留 ce + LAMBDA_MEM*mem_sum（删 ent_ctrl/connection_strength/orth_sum）
 
                     loss = ce_loss + LAMBDA_MEM * (mem_sum / nc)
 
@@ -985,11 +985,11 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                         loss = loss + LAMBDA_KD * kd_loss
 
-                    mix_ent = (mix_ent_sum / nc).item()    # 锁4.3监控：混合系数熵（观察分化，不进 loss）
+                    wiring_ent = (wiring_ent_sum / nc).item()    # 锁4.3监控：接线系数熵（观察正常电路，不进 loss）
 
                 else:
 
-                    mix_ent = 0.0
+                    wiring_ent = 0.0
 
                     kd_val = 0.0
 
@@ -1061,7 +1061,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
                       f"mem_lr={opt.param_groups[1]['lr']:.2e} "
 
-                      f"mix_ent={mix_ent:.4f} ce={ce_loss.item():.4f}", flush=True)
+                      f"wiring_ent={wiring_ent:.4f} ce={ce_loss.item():.4f}", flush=True)
 
                 if temp is not None and temp >= GPU_TEMP_MAX:
 

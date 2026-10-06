@@ -38,8 +38,8 @@ MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 �
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
-TOPK_ORG = 4  # 锁3.7：org_sum 归一化除数（与模型 topk_organelle=4 一致）
-LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.01, 0.05, 0.05, 0.05   # 锁3.8：ENT 回落 0.05 基线（0.03 与 0.1 折中）；org_sum 归一化频次权重 0.05；KD 蒸馏项 0.05 起步
+TOPK_ORG = 4  # 锁3.7：connection_strength 归一化除数（与模型 topk_organelle=4 一致）
+LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG, LAMBDA_KD = 0.01, 0.05, 0.05, 0.05   # 锁3.8：ENT 回落 0.05 基线（0.03 与 0.1 折中）；connection_strength 归一化频次权重 0.05；KD 蒸馏项 0.05 起步
 # ---- 锁3.8：分层结构先验 bias（route_proj 输出后加，浅/中/深层强制不同样本分布）----
 # L=4 层 x 8 organelle：浅层偏向前段 organelle，中层中段，深层后段（软先验，可训练微调）
 LAYER_BIASES = [
@@ -129,7 +129,7 @@ class FastCellMoE(nn.Module):
         self.memory_attn = attn.detach()
         assembly = attn @ asm                                    # [B, N]
         mem_features = attn @ val                                # [B, d]
-        mem_gate = self.route_proj(mem_features) + self.layer_bias   # [B, N] ← 忆点调制路由 + 锁3.8分层先验
+        mem_gate = self.route_proj(mem_features) + self.layer_bias   # [B, N] ← 忆点调制接线 + 锁3.8分层先验
         if self.training:
             # 锁3.6：Gumbel 噪声 tau 降至 0.5（1.0 过早锁定幸运细胞），鼓励平缓探索；eval 不加保持确定性
             logits = assembly + mem_gate
@@ -146,7 +146,7 @@ class FastCellMoE(nn.Module):
         w3 = topk_w.unsqueeze(-1)
         idx3 = topk_idx.unsqueeze(-1).expand(-1, -1, self.d)
         out = (org_out.gather(1, idx3) * w3).sum(1)             # [B, d]
-        # 监控（可选，不影响梯度）：忆点对路由的贡献
+        # 监控（可选，不影响梯度）：忆点对接线的贡献
         if not hasattr(self, '_ratios'):
             self._ratios = []
         self._ratios.append((mem_gate.norm() / (assembly.norm() + 1e-9)).item())
@@ -460,34 +460,34 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                 loss = ce_loss
                 if use_reg and isinstance(info, dict):
                     cell_infos = info.get('cell_infos', [info])
-                    ent_sum = mem_sum = org_sum = 0.0
+                    ent_sum = mem_sum = connection_strength = 0.0
                     for ci in cell_infos:
                         w = ci['weights']
                         ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()   # 单样本熵：锁3.7 起参与 loss（低熵自信）
                         mu = ci['memory_attn'].mean(dim=0)
                         mem_sum += (mu * mu).sum() * mu.shape[-1]
-                        # 锁3.7：org_sum 归一化修正——f_hard/topk，均匀=1、全压=N/topk=2
+                        # 锁3.7：connection_strength 归一化修正——f_hard/topk，均匀=1、全压=N/topk=2
                         # （锁3.6 未归一化导致 topk=4 时均匀下界=16、梯度恒零、全员平庸）
                         f_soft = ci['weights'].mean(dim=0) / TOPK_ORG          # [N]，可导概率均值（归一化）
                         one_hot = torch.zeros_like(ci['weights'])
                         one_hot.scatter_(1, ci['topk_idx'], 1.0)              # [B, N] 真实选择
                         f_hard = one_hot.mean(dim=0) / TOPK_ORG               # [N]，真实使用频次（归一化）
                         f = f_hard + (f_soft - f_soft.detach())               # STE
-                        org_sum += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，全压→N/topk=2
+                        connection_strength += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，全压→N/topk=2
                     nc = len(cell_infos)
                     kd_loss = info.get('kd_loss')
                     kd_val = (kd_loss.item() if kd_loss is not None else 0.0)
                     # 锁3.7：单样本低熵自信正则（+LAMBDA_ENT*ent_sum，惩罚犹豫/鼓励果断）
-                    # + 归一化 org_sum 跨样本均衡（0.05）+ MEM 忆点覆盖（0.01）
+                    # + 归一化 connection_strength 跨样本均衡（0.05）+ MEM 忆点覆盖（0.01）
                     # 锁3.8：+ KD 蒸馏项（好学生 cell1 教中等生/差生，LAMBDA_KD=0.05）
-                    loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ENT * (ent_sum / nc) + LAMBDA_ORG * (org_sum / nc)
+                    loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ENT * (ent_sum / nc) + LAMBDA_ORG * (connection_strength / nc)
                     if kd_loss is not None:
                         loss = loss + LAMBDA_KD * kd_loss
-                    router_ent = (ent_sum / nc).item()    # 锁3.7监控：单样本 weights 熵（目标 1.2~1.6，不能<1.0）
-                    org_sum_val = (org_sum / nc).item()   # 锁3.7监控：归一化频次均衡度（均匀=1，全压=2，目标 1.5~2.0）
+                    wiring_ent = (ent_sum / nc).item()    # 锁3.7监控：单样本 weights 熵（目标 1.2~1.6，不能<1.0）
+                    connection_strength_val = (connection_strength / nc).item()   # 锁3.7监控：归一化频次均衡度（均匀=1，全压=2，目标 1.5~2.0）
                 else:
-                    router_ent = 0.0
-                    org_sum_val = 0.0
+                    wiring_ent = 0.0
+                    connection_strength_val = 0.0
                     kd_val = 0.0
 
             t0 = time.time()
@@ -521,7 +521,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                       f"loss={e_sum / e_n:.4f} util={u}% temp={temp}C "
                       f"lr={opt.param_groups[0]['lr']:.2e} "
                       f"mem_lr={opt.param_groups[1]['lr']:.2e} "
-                      f"router_ent={router_ent:.4f} org_sum={org_sum_val:.4f} "
+                      f"wiring_ent={wiring_ent:.4f} connection_strength={connection_strength_val:.4f} "
                       f"kd={kd_val:.4f}", flush=True)
                 if temp is not None and temp >= GPU_TEMP_MAX:
                     print(f"[S5] GPU temp {temp}C >= {GPU_TEMP_MAX}C，暂停 20s 降温",
@@ -586,7 +586,7 @@ def main():
 
     ce, cp, cu, ct, es, df = train_one(cell, train_ids, val_ids, vocab_size,
                                        "CellMoE", True)
-    # ---- 路由调制监控：mem_gate/assembly ratio（验收指标之二）----
+    # ---- 接线调制监控：mem_gate/assembly ratio（验收指标之二）----
     ratios = []
     for layer in cell.layers:
         for c in layer.cells:
