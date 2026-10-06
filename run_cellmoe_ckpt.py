@@ -364,14 +364,26 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
     # 数据预加载到 GPU：训练前一次性搬运，避免每步 CPU→GPU 拷贝
     train_ids = train_ids.to(DEVICE)
     val_ids = val_ids.to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=LR, fused=True)
+    # ---- 锁14/19：分组 lr（细胞器 3e-4，忆点 3e-5=小10倍，其余默认 3e-4）----
+    organelle_params = [p for n, p in model.named_parameters()
+                        if "W1" in n or "W2" in n]
+    memory_params = [p for n, p in model.named_parameters()
+                     if "memory" in n or "route_proj" in n]
+    rest_params = [p for n, p in model.named_parameters()
+                   if not ("W1" in n or "W2" in n
+                           or "memory" in n or "route_proj" in n)]
+    opt = torch.optim.Adam([
+        {"params": organelle_params, "lr": LR, "base_lr": LR},
+        {"params": memory_params, "lr": LR / 10, "base_lr": LR / 10},
+        {"params": rest_params, "lr": LR, "base_lr": LR},
+    ], fused=True)
     n_steps = max(1, train_ids.numel() // (SEQ_LEN * BATCH_SIZE))
     epochs = EPOCHS
     total_steps = n_steps * epochs
     warmup = max(1, int(total_steps * 0.05))
 
-    def lr_at(st):
-        return LR * (st + 1) / warmup if st < warmup else LR
+    def lr_at(st, base_lr):
+        return base_lr * (st + 1) / warmup if st < warmup else base_lr
 
     t_start = time.time()
     step_global = 0
@@ -401,7 +413,7 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
 
             if step_global % 10 == 0:
                 for g in opt.param_groups:
-                    g['lr'] = lr_at(step_global)
+                    g['lr'] = lr_at(step_global, g['base_lr'])
             opt.zero_grad(set_to_none=True)
 
             t0 = time.time()
@@ -455,7 +467,8 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                       f"forward={w_fwd / w_n * 1000:.1f}ms "
                       f"opt={w_opt / w_n * 1000:.1f}ms "
                       f"loss={e_sum / e_n:.4f} util={u}% temp={temp}C "
-                      f"lr={lr_at(step_global):.2e}", flush=True)
+                      f"lr={opt.param_groups[0]['lr']:.2e} "
+                      f"mem_lr={opt.param_groups[1]['lr']:.2e}", flush=True)
                 if temp is not None and temp >= GPU_TEMP_MAX:
                     print(f"[S5] GPU temp {temp}C >= {GPU_TEMP_MAX}C，暂停 20s 降温",
                           flush=True)
