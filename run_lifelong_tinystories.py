@@ -32,7 +32,7 @@ from run_cellmoe_ckpt import (  # noqa: E402
 )
 
 SEQ_LEN_ = SEQ_LEN
-BATCH_SIZE, EPOCHS, LR, SEED = 64, 3, 1e-3, 2026
+BATCH_SIZE, EPOCHS, LR, SEED = 64, 10, 1e-3, 2026
 NEW_ADD = 8            # 每个细胞新增忆点数
 GPU_TEMP_MAX = 80
 CKPT_PATH = os.path.join(BASE, "checkpoints", "cellmoe_tinystories.pt")
@@ -61,7 +61,7 @@ class FastCellMoE_L(nn.Module):
         self.memory_keys = nn.Parameter(torch.randn(n_memory, d) * 0.1)
         self.memory_assembly = nn.Parameter(torch.zeros(n_memory, n_organelles))
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
-        self.group_w = nn.Parameter(torch.tensor([0.5]))
+        self.group_w = nn.Parameter(torch.tensor([-2.0]))
         self.head = nn.Linear(d, d, bias=False)
         self.last_topk = None
         self.memory_attn = None
@@ -69,12 +69,15 @@ class FastCellMoE_L(nn.Module):
         self.new_memory_assembly = None
         self.new_memory_value = None
 
-    def add_new_memory(self, add=8, seed=2026):
+    def add_new_memory(self, add=8, seed=2026, init_keys=None):
         dev = self.memory_keys.device
         g = torch.Generator(device=dev).manual_seed(seed)
-        new_keys = torch.randn(add, self.d, generator=g, device=dev) * 0.3
-        new_asm = torch.zeros(add, self.n_organelles, device=dev)
-        new_val = torch.randn(add, self.d, device=dev) * 0.01
+        if init_keys is not None:
+            new_keys = init_keys.to(dev)[:add]
+        else:
+            new_keys = torch.randn(add, self.d, generator=g, device=dev) * 0.3
+        new_asm = torch.randn(add, self.n_organelles, device=dev) * 0.1
+        new_val = torch.randn(add, self.d, device=dev) * 0.1
         if self.new_memory_keys is None:
             self.new_memory_keys = nn.Parameter(new_keys)
             self.new_memory_assembly = nn.Parameter(new_asm)
@@ -312,9 +315,16 @@ def main():
 
     # ---- 加新忆点 + 冻结旧参数 ----
     n_cells = 0
+    # warm-init: 从 bible 数据编码 new_keys
+    import torch.nn.functional as F
+    with torch.no_grad():
+        n_sample = NEW_ADD * 16
+        sample_ids = bible_train[:n_sample].reshape(NEW_ADD, 16).to(DEVICE)
+        sample_emb = model.embed(sample_ids).mean(dim=1)   # [NEW_ADD, d]
+        init_keys = F.normalize(sample_emb, dim=-1) * 0.5  # 归一化 + 缩放
     for layer in model.layers:
         for cell in layer.cells:
-            cell.add_new_memory(NEW_ADD, seed=SEED)
+            cell.add_new_memory(NEW_ADD, seed=SEED, init_keys=init_keys)
             n_cells += 1
     for p in model.parameters():
         p.requires_grad_(False)
