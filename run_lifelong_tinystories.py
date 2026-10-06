@@ -340,7 +340,7 @@ def main():
                   if p.requires_grad and "new_memory_value" in name]
     opt = torch.optim.Adam([
         {"params": key_params, "lr": LR, "weight_decay": 1e-2},
-        {"params": val_params, "lr": 3e-6, "weight_decay": 1e-1},
+        {"params": val_params, "lr": 1e-3, "weight_decay": 1e-1},
     ])
     n_steps = max(1, bible_train.numel() // (SEQ_LEN_ * BATCH_SIZE))
     t0 = time.time()
