@@ -50,7 +50,7 @@ class FastCellMoE(nn.Module):
     """等价 ImprovedCellMoE：organelles 用 einsum 并行，其余逻辑一致。"""
 
     def __init__(self, d, n_organelles=8, n_memory=32, topk=4,
-                 memory_read_scale=25.0, h=32):
+                 memory_read_scale=1.0, h=32):
         super().__init__()
         self.d = d
         self.n_organelles = n_organelles
