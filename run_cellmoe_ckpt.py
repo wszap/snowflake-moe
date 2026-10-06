@@ -38,7 +38,7 @@ MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 �
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
-LAMBDA_MEM, LAMBDA_ORG = 0.01, 0.01  # 锁3.5：MEM 均衡沿用 0.01；org_sum 可导版权重 0.01（初始值，可调）；熵正则已删除（LAMBDA_ENT 不再使用）
+LAMBDA_MEM, LAMBDA_ORG = 0.01, 0.1   # 锁3.6：MEM 均衡沿用 0.01；org_sum STE 频次权重 0.1（放大对抗 ce_loss 对单 cell 偏爱）；熵正则已删除
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
@@ -117,10 +117,10 @@ class FastCellMoE(nn.Module):
         mem_features = attn @ val                                # [B, d]
         mem_gate = self.route_proj(mem_features)                 # [B, N] ← 忆点调制路由
         if self.training:
-            # 锁3.5：训练时给路由 logits 加 Gumbel 噪声（tau=1.0），鼓励探索打破均匀平均陷阱；eval 不加保持确定性
+            # 锁3.6：Gumbel 噪声 tau 降至 0.5（1.0 过早锁定幸运细胞），鼓励平缓探索；eval 不加保持确定性
             logits = assembly + mem_gate
             gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
-            weights = F.softmax(logits + gumbel_noise * 1.0, dim=-1)
+            weights = F.softmax(logits + gumbel_noise * 0.5, dim=-1)
         else:
             weights = F.softmax(assembly + mem_gate, dim=-1)
         topk_w, topk_idx = torch.topk(weights, self.topk, dim=-1)
@@ -439,16 +439,20 @@ def train_one(model, train_ids, val_ids, vocab_size, tag, use_reg):
                         ent_sum += -(w * torch.log(w + 1e-9)).sum(-1).mean()   # 仅监控：router_ent
                         mu = ci['memory_attn'].mean(dim=0)
                         mem_sum += (mu * mu).sum() * mu.shape[-1]
-                        # 锁3.5：org_sum 改可导版（weights softmax 概率均值），偏离均匀则受罚；
-                        # 弃用 topk 离散频率（无梯度，锁3 已证其梯度切断导致均匀平均陷阱）
-                        mu_org = ci['weights'].mean(dim=0)     # [N_org]，可导
-                        org_sum += (mu_org * mu_org).sum() * mu_org.shape[-1]
+                        # 锁3.6：org_sum 用带 STE 的真实使用频次，惩罚"单个专家被极度依赖"
+                        # forward 值=f_hard（topk one-hot 均值，真实频次）；梯度经 f_soft 可导路径回传
+                        f_soft = ci['weights'].mean(dim=0)                    # [N]，可导概率均值
+                        one_hot = torch.zeros_like(ci['weights'])
+                        one_hot.scatter_(1, ci['topk_idx'], 1.0)              # [B, N] 真实选择
+                        f_hard = one_hot.mean(dim=0)                          # [N]，真实使用频次
+                        f = f_hard + (f_soft - f_soft.detach())               # STE
+                        org_sum += (f * f).sum() * f.shape[-1]                # N*sum(f²)：均匀→1，单专家→N
                     nc = len(cell_infos)
-                    # 锁3.5：删除熵正则项（原 -LAMBDA_ENT*(ent_sum/nc + 0.25*gate_ent)），
-                    # org_sum 以 LAMBDA_ORG=0.01 加回 loss
+                    # 锁3.6：删除熵正则项（原 -LAMBDA_ENT*(ent_sum/nc + 0.25*gate_ent)），
+                    # org_sum 以 LAMBDA_ORG=0.1（STE 频次版）加回 loss
                     loss = ce_loss + LAMBDA_MEM * (mem_sum / nc) + LAMBDA_ORG * (org_sum / nc)
-                    router_ent = (ent_sum / nc).item()    # 锁3.5监控：weights 熵（期望从 2.0794 向 1.0~1.5 靠拢）
-                    org_sum_val = (org_sum / nc).item()   # 锁3.5监控：softmax 概率均值均衡度（期望 1.0~1.5）
+                    router_ent = (ent_sum / nc).item()    # 锁3.6监控：weights 熵（目标 1.2~1.6，不能<1.0）
+                    org_sum_val = (org_sum / nc).item()   # 锁3.6监控：STE 频次均衡度（目标 1.5~3.0，不能 1.0/8.0）
                 else:
                     router_ent = 0.0
                     org_sum_val = 0.0
