@@ -62,7 +62,8 @@ class FastCellMoE(nn.Module):
         # 8 个 Organelle 权重合并（等价钱：x->W1[.,h] SiLU ->W2[.,d]）
         self.W1 = nn.Parameter(torch.randn(n_organelles, d, h) * (2.0 / math.sqrt(d)))
         self.W2 = nn.Parameter(torch.randn(n_organelles, h, d) * (2.0 / math.sqrt(h)))
-        self.memory_keys = nn.Parameter(torch.randn(n_memory, d) * 0.1)
+        self.memory_keys = nn.Parameter(
+            F.normalize(self.encoder.weight[:n_memory].detach(), dim=-1) * 0.1)
         self.memory_assembly = nn.Parameter(torch.zeros(n_memory, n_organelles))
         self.memory_value = nn.Parameter(torch.zeros(n_memory, d))
         self.route_proj = nn.Linear(self.d, n_organelles, bias=False)
