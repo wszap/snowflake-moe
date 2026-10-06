@@ -39,7 +39,7 @@ EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epo
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
 TOPK_ORG = 4  # 锁3.7：org_sum 归一化除数（与模型 topk_organelle=4 一致）
-LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG = 0.01, 0.01, 0.05   # 锁3.7：MEM 沿用 0.01；单样本低熵自信正则 0.01（最小化熵=果断路由）；org_sum 归一化频次权重 0.05
+LAMBDA_MEM, LAMBDA_ENT, LAMBDA_ORG = 0.01, 0.1, 0.05   # 锁3.7.1：MEM 沿用 0.01；单样本低熵自信正则 0.1（翻十倍，强低熵惩罚逼 router 果断）；org_sum 归一化频次权重 0.05
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
