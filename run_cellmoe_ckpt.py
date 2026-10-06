@@ -38,7 +38,7 @@ MAX_TOTAL_SEC = 55 * 60  # 绝对保护：55min 强制收尾出 PPL（满足"1 �
 EPOCH_BUDGET_SEC = 540   # 单 epoch 预算 9min：epoch1 超预算自动降 epochs 5->3
 DIAG_EVERY = 200         # 每 200 step 打印 data_load_time / model_forward_time
 GPU_TEMP_MAX = 80        # 温度红线：>=80C 暂停 20s 降温
-LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 1e-3, 1e-3, 1e-3  # 锁3：熵正则+均衡loss权重（老板指示 1e-3 起试，待把关）
+LAMBDA_ENT, LAMBDA_MEM, LAMBDA_ORG = 0.01, 0.01, 0.01  # 锁3：熵正则+均衡loss权重（老板拍板：0.05 已弱、1e-3 形同虚设，取 0.01）
 # ---- 锁20：忆点 lr 回调（锁14/19 的 3e-5 饿死忆点，mem_gate/assembly ratio 1428x；建议 1e-4~1.5e-4）----
 MEM_LR = 1e-4
 DATA = os.path.join(BASE, "tinystories_100mb.txt")
