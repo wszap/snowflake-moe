@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 39b3c1e52d56df687e379d81ca7e9c3c_109bcebdc18011f1bc7f525400638852
+    ReservedCode1: o/S/OGWSbOYIsvLGIelNJvZeOYFARYvJdKipKSjBR4suzXWIBtFsU1a/V2gos2YHkn7XS4RnUaaZnxoEyEItyWxr0lNi2IdL09NFRl6f0op0TBI/SXhYI21mCFS8BEORwfEzVKTT84JoHp2Tm0jAAyj8oAHIaxl3E2tX8g6zpN1VLMmvuoy0uZgL1KQ=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 39b3c1e52d56df687e379d81ca7e9c3c_109bcebdc18011f1bc7f525400638852
+    ReservedCode2: o/S/OGWSbOYIsvLGIelNJvZeOYFARYvJdKipKSjBR4suzXWIBtFsU1a/V2gos2YHkn7XS4RnUaaZnxoEyEItyWxr0lNi2IdL09NFRl6f0op0TBI/SXhYI21mCFS8BEORwfEzVKTT84JoHp2Tm0jAAyj8oAHIaxl3E2tX8g6zpN1VLMmvuoy0uZgL1KQ=
+---
+
 # Snowflake MoE 代码改动历程
 
 | 日期 | 锁编号 | commit | 改动内容 | 改动原因 | 结论 |
@@ -14,3 +25,4 @@
 | 10-06 | 锁3.8 | ee80d97 | LAMBDA_ENT=0.05 + LAMBDA_KD=0.05 + 硬分层偏置 | 引入知识蒸馏+结构分流 | 反向污染，teacher权重萎缩，更早坍缩（step1800） |
 | 10-06 | 锁3.9 | - | 双向熵控制（TARGET_ENT=1.4）+ 不可学习硬分层偏置（前1000步）+ 关闭KD | 用双向控制替代单向惩罚 | wiring_ent=1.86稳定，但细胞已学会分工（ΔPPL+24~37） |
 | 10-06 | 锁4.0 | - | 新增 organelle_query（内容寻址接线），保留双向控制 | 让细胞主动认领样本，打破断路 | 完成：val_ppl=10.0277，wiring_ent 1.86→1.66 缓慢下滑，connection_strength 恒 1.0001，ΔPPL+29~33，仍未打破断路 |
+*（内容由AI生成，仅供参考）*

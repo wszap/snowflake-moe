@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 39b3c1e52d56df687e379d81ca7e9c3c_11632b92c18011f1bc7f525400638852
+    ReservedCode1: fdWiHLlf3PaLbpomARP1e5ydlGv8gxvcs8XBk9/1BSAlDq19364C0kPY15LlJTYsGHn44vrnOjzpufcbZVnzJC4IM5gBwCEJwI8mq+vJzXQbSYiWszpHZx6Li/Qpbc/tgtsOI3yuSwErD0Z0YTq0Ke/5qg0r7o17SD5x47Klrevv4NqmK9HtxnAOw74=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 39b3c1e52d56df687e379d81ca7e9c3c_11632b92c18011f1bc7f525400638852
+    ReservedCode2: fdWiHLlf3PaLbpomARP1e5ydlGv8gxvcs8XBk9/1BSAlDq19364C0kPY15LlJTYsGHn44vrnOjzpufcbZVnzJC4IM5gBwCEJwI8mq+vJzXQbSYiWszpHZx6Li/Qpbc/tgtsOI3yuSwErD0Z0YTq0Ke/5qg0r7o17SD5x47Klrevv4NqmK9HtxnAOw74=
+---
+
 # Snowflake MoE 实验记录
 
 ## 一、关键洞察（贯穿全程）
@@ -60,3 +71,4 @@
 2. 模型只会在"断路"（wiring_ent=1.88）与"短路"（wiring_ent=0）之间震荡
 3. 需要引入内容寻址（架构级改动）+ 双向控制（宏观约束）
 4. 边缘算力（RTX 5060 8GB）可复现大模型级MoE病理
+*（内容由AI生成，仅供参考）*
