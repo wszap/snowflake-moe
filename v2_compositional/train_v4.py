@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--temp", type=float, default=5.0)
     ap.add_argument("--variant", default="base")
     ap.add_argument("--shared-mult", type=int, default=4)
+    ap.add_argument("--clone-temp", type=float, default=2.0)
     ap.add_argument("--bs", type=int, default=64)
     ap.add_argument("--seq-len", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -63,6 +64,8 @@ def main():
     print("  device=%s  bf16=%s  steps=%d" % (device, bf16, max_steps))
     print("  variant=%s  shared_mult=%d  rank=%d  temp=%s  d=%d"
           % (a.variant, a.shared_mult, a.rank, a.temp, a.d))
+    if "clone" in a.variant:
+        print("  clone_temp=%s  (控制复制几种标本)" % a.clone_temp)
     print("=" * 70, flush=True)
 
     get_batch, vocab_size = load_data(a.data, a.seq_len, a.bs, a.fix_mojibake)
@@ -73,6 +76,7 @@ def main():
         n_head=a.n_head, scaffold_top_k=a.scaffold_top_k,
         select_mode=a.select_mode, variant=a.variant,
         shared_mult=a.shared_mult, seed=a.seed,
+        clone_temp=a.clone_temp,
     ).to(device)
 
     params = sum(p.numel() for p in model.parameters())
