@@ -138,8 +138,10 @@ class SegmentKakeyaFlipper(nn.Module):
                 # 「半边转」而破坏保范 ⇒ 直接跳过（等价于 θ=0，恒等）
                 degen = nv < 1e-6
                 v = v / nv.clamp(min=1e-12).unsqueeze(-1)
+                # 注：th[k] 是 0-dim 张量，torch.where 会自动广播到 nv.shape；
+                #     不能用 new_full（它只接受 Python 数字）
                 th_eff = torch.where(
-                    degen, torch.zeros_like(nv), nv.new_full(nv.shape, th[k]))
+                    degen, torch.zeros_like(nv), th[k].to(nv.dtype).expand_as(nv))
                 h = givens_rotate(h, u, v, th_eff)
 
             # ---- 留：密封圈（可选衰减，默认不衰减）----
@@ -168,11 +170,13 @@ class SegKakeyaLMV3(nn.Module):
         self.n_seg = n_seg
 
         n_anchors = kw.get("n", 384)
+        # K=0 时完全不创建（否则 anchors 会白占 384*d*L 个参数，
+        # 把基线的参数量报高 ~3.5%，破坏与 v3 的可比性）
         self.flippers = nn.ModuleList([
             SegmentKakeyaFlipper(d, n_anchors=n_anchors,
                                  K=max(kakeya_k, 1), n_seg=n_seg)
             for _ in range(L)
-        ])
+        ]) if kakeya_k > 0 else nn.ModuleList()
         self._share_memory = share_memory
 
     def _memory_anchors(self, li):
