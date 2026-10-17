@@ -250,7 +250,12 @@ def main():
     ap.add_argument("--max-steps", type=int, default=3000)
     ap.add_argument("--bs", type=int, default=64)
     ap.add_argument("--seq", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=3e-3)
+    # ★ 公平性: Snowflake 用 lr=3e-4（见 record.json 的 config.lr）。
+    #   原默认 3e-3 比它大 10 倍，违反本文件开头声明的
+    #   "同一套训练超参"原则 ⇒ 对比不可信。改为 3e-4 对齐。
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr-scan", action="store_true",
+                    help="lr 扫描（稳健性检验：证明结论不依赖单一 lr）")
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--fix-mojibake", action="store_true")
     ap.add_argument("--outdir", type=str, default="output/dense")
@@ -262,6 +267,10 @@ def main():
                     help="跳过泄漏自检（不建议）")
     ap.add_argument("--leak-check-only", action="store_true",
                     help="只跑泄漏自检然后退出")
+    ap.add_argument("--snow-loss", type=float, default=1.916,
+                    help="Snowflake 的实测 loss（用于判定临界点）")
+    ap.add_argument("--snow-params", type=int, default=5164132,
+                    help="Snowflake 的参数量（A10 实测，vocab=100）")
     ap.add_argument("--scale-sweep", action="store_true",
                     help="扫规模：找达到 Snowflake loss 的临界参数量")
     a = ap.parse_args()
@@ -291,7 +300,9 @@ def main():
             out.append((L_, d_, r["params"], r["val_loss"]))
             print(f"  L={L_} d={d_}  params={r['params']:,}  "
                   f"val_loss={r['val_loss']:.5f}", flush=True)
-        print("\n  汇总（Snowflake tiny: 5,163,618 params, loss=1.7882）:")
+        base_loss = a.snow_loss
+        print(f"\n  汇总（Snowflake tiny: {a.snow_params:,} params, "
+              f"loss={base_loss:.4f}）:")
         print(f"  {'L':>3}{'d':>6}{'params':>13}{'vs Snow':>9}{'loss':>10}")
         for L_, d_, pp, ll in sorted(out, key=lambda x: x[2]):
             print(f"  {L_:>3}{d_:>6}{pp:>13,}{pp/5_163_618:>8.3f}x{ll:>10.5f}")
