@@ -17,6 +17,19 @@ from scaffold_v3 import leak_check
 from snowflake_v4 import SnowflakeLMV4
 
 
+def _make_fm(model, x):
+    """拼/选消融：只替换 wiring，其余完全不动。返回 None 或 [n] 向量。"""
+    mode = getattr(model, "_fm_mode", "none")
+    if mode == "none":
+        return None
+    n_org = model.layers[0][0].n
+    if mode == "uniform":
+        return torch.ones(n_org, device=x.device) / n_org    # 静态全库平均：仍是拼
+    if mode == "onehot":
+        fm = torch.zeros(n_org, device=x.device); fm[0] = 1.0  # 单专家：反面「选」
+        return fm
+    raise ValueError(mode)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -41,6 +54,7 @@ def main():
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--smoke-steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--force-mix", choices=["none","uniform","onehot"], default="none")
     ap.add_argument("--tag", default="")
     ap.add_argument("--no-bf16", dest="bf16", action="store_false",
                     default=True)
@@ -79,6 +93,9 @@ def main():
         clone_temp=a.clone_temp,
     ).to(device)
 
+    model._fm_mode = a.force_mix
+    if a.force_mix != "none":
+        print("[ablation] force_mix =", a.force_mix, flush=True)
     params = sum(p.numel() for p in model.parameters())
     print("[model] 参数量 %s" % format(params, ","), flush=True)
 
@@ -123,7 +140,7 @@ def main():
         x, y = x.to(device), y.to(device)
 
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
-            logits, diag = model(x)
+            logits, diag = model(x, force_mix=_make_fm(model, x))
         loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)),
                                y.view(-1))
 
