@@ -80,6 +80,12 @@ FINAL_FIELDS.update({
     "loss_permuted_sd": "float",
     "core_stat": "float", "core_stat_ci_lo": "float", "core_stat_ci_hi": "float",
     "cohens_dz": "float", "p_core": "float", "n_permute_repeats": "int",
+    # ★ Bug10: Bug9 新增的配对检验字段，漏注册会让 finalize 抛错
+    "core_stat_paired_sd": "float", "n_paired_batches": "int",
+    "n_eff_used": "int",
+    # ★ Bug10: Bug5 新增的告警计数诊断字段
+    "sharp_warn_sampled": "int", "sharp_warn_total": "int",
+    "wiring_variance": "float", "n_organelles": "int",
     "release_sharp_on": "float", "release_sharp_off": "float",
     "release_eff_on": "float", "release_eff_off": "float",
     "release_rebound": "float", "release_verdict": "str",
@@ -166,6 +172,11 @@ class RunMetrics:
             "cos_max": "cos_max", "connect_rowsum": "connect_rowsum",
             "wiring_ent": "wiring_ent", "wiring_variance": "wiring_variance",
             "mix_sharp": "mix_sharp",
+            # ★ Bug1: 这两个是【核心量】，之前漏了 → eff 从未落盘。
+            #   eff_organs = 1/Σw²，跨 N 可比（L-023）
+            #   wiring_var_norm = wvar/var_max，解决 N=384 下 0.05 不可达
+            "eff_organs": "eff_organs",
+            "wiring_var_norm": "wiring_var_norm",
         }
         for src, dst in key_map.items():
             if src in agg:
@@ -272,16 +283,38 @@ class RunMetrics:
         core = float(l_p - l_l)
         res["core_stat"] = core
 
-        # 用 permuted 的重复采样做 t 检验（近似）
-        sd = max(res["loss_permuted_sd"], 1e-12)
-        n_eff = max(n_perm * n_batch, 2)
-        se = sd / math.sqrt(n_eff)
+        # ★ Bug9: 下面这段是新写的【配对】检验，替换掉原来的伪重复估计。
+        #   core 本身（两个 loss 之差）不变，变的是 se/CI/p/d_z —— 全部变保守。
+        #   L["permuted"] 的 append 顺序是 batch 外层 / perm 内层，
+        #   所以可以按 n_perm 切段还原出每个 batch 的 permuted 均值。
+        _P = list(L["permuted"]); _Lr = list(L["learned"])
+        _nb = min(len(_Lr), len(_P) // max(n_perm, 1))
+        _diffs = []
+        for i in range(_nb):
+            seg = _P[i * n_perm:(i + 1) * n_perm]
+            if seg:
+                # 配对差：同一 batch 上的 (permuted 均值 − learned)
+                _diffs.append(float(np.mean(seg)) - float(_Lr[i]))
+        if len(_diffs) > 1:
+            _d = np.asarray(_diffs)
+            sd_d = float(np.std(_d, ddof=1))
+            se = sd_d / math.sqrt(len(_d))
+            n_eff = len(_d)
+            res["core_stat_paired_sd"] = sd_d      # 配对差的 sd（新）
+            res["n_paired_batches"] = int(n_eff)   # 有效样本数（新）
+        else:
+            # 兜底：退化为按 batch 数（不乘 n_perm）的保守估计
+            sd_d = max(res["loss_permuted_sd"], 1e-12)
+            n_eff = max(n_batch, 2)
+            se = sd_d / math.sqrt(n_eff)
+        res["n_eff_used"] = int(n_eff)             # 诊断：旧代码会是 1000
         try:
             from scipy import stats as st
             tcrit = st.t.ppf(0.975, max(n_eff - 1, 1))
             res["core_stat_ci_lo"] = float(core - tcrit * se)
             res["core_stat_ci_hi"] = float(core + tcrit * se)
-            res["cohens_dz"] = float(core / sd) if sd > 0 else 0.0
+            # Cohen's d_z 用配对差的 sd 才对（原来是 permuted 单样本的 sd）
+            res["cohens_dz"] = float(core / sd_d) if sd_d > 0 else 0.0
             res["p_core"] = float(2 * (1 - st.t.cdf(abs(core / se), max(n_eff - 1, 1))))
         except Exception:
             res["core_stat_ci_lo"] = res["core_stat_ci_hi"] = float(core)
@@ -315,7 +348,18 @@ class RunMetrics:
     def finalize(self, model=None, final=None, verdicts=None):
         f = dict(final or {})
         f["total_wall_sec"] = time.time() - self.t0
-        f["sharp_warn_triggered"] = int(self.sharp_triggered)
+        # ★ Bug5: 只在 log_step 采样点（每 100 步）检查 sharp，
+        #   实测 step 10~90 sharp 高达 0.75~0.97，但采样点在 step0(0.008)/
+        #   step100(0.178) 全部错过 ⇒ 计数恒为 0。
+        #   改为：优先读模型侧的【逐步累计】计数，采样计数仅作兜底。
+        model_cnt = 0
+        if model is not None:
+            for layer in getattr(model, "layers", []):
+                for c in layer:
+                    model_cnt += int(getattr(c, "sharp_warn_count", 0) or 0)
+        f["sharp_warn_triggered"] = int(max(self.sharp_triggered, model_cnt))
+        f["sharp_warn_sampled"] = int(self.sharp_triggered)   # 诊断用
+        f["sharp_warn_total"] = int(model_cnt)                # 诊断用
         if model is not None:
             try:
                 f["params_total"] = int(sum(p.numel() for p in model.parameters()))
@@ -326,7 +370,11 @@ class RunMetrics:
                            ("mix_sharp", "mix_sharp_final"),
                            ("cos_mean", "cos_mean_final"),
                            ("combo_dim", "combo_dim"),
-                           ("flops_ratio", "flops_ratio")]:
+                           ("flops_ratio", "flops_ratio"),
+                           # ★ Bug2: eff / wiring 方差从未进 final
+                           ("eff_organs", "eff_organs_final"),
+                           ("wiring_variance", "wiring_variance"),
+                           ("wiring_var_norm", "wiring_var_norm")]:
                 if k in st:
                     f[dst] = float(st[k])
             f.setdefault("peak_mem_mb",
@@ -346,9 +394,28 @@ class RunMetrics:
         ib = final.get("in_band_final", None)
         if ib is not None:
             v["H1_连接带内占比"] = "pass" if ib >= 0.7 else "fail"
-        wv = final.get("wiring_variance", None)
+        # ★ Bug3: 原用 wiring_variance + 0.05 阈值。
+        #   N=384 下 wvar 的理论上限仅 0.0026，0.05 数学上不可达（L-023）。
+        #   ⇒ 改用 wiring_var_norm = wvar/var_max，阈值 0.05 才有意义。
+        # ★ Bug6: 原代码 get("wiring_variance")，但注册的是 wiring_var_norm，
+        #   键名不一致 ⇒ 即使填了值也读不到，H2 被静默跳过。
+        wv = final.get("wiring_var_norm", None)
+        if wv is None:                       # 兼容老数据：现场归一化
+            raw = final.get("wiring_variance", None)
+            n = final.get("n_organelles", 384)
+            if raw is not None and n:
+                _m = 1.0 / n
+                vmax = (1.0 / n) * (1 - _m) ** 2 + ((n - 1) / n) * _m ** 2
+                wv = raw / vmax if vmax > 0 else raw
         if wv is not None:
             v["H2_跨样本方差"] = "pass" if wv > 0.05 else "fail"
+
+        # ★ 新增 H2b：有效器官数判据（比方差更直观，且跨 N 可比）
+        ef = final.get("eff_organs_final", None)
+        if ef is not None:
+            # one-hot ≈ 1；真组合应远大于 1
+            v["H2b_有效器官数"] = "pass" if ef >= 8 else (
+                "warn" if ef >= 2 else "fail")
         ms = final.get("mix_sharp_final", None)
         if ms is not None:
             v["H3_非onehot"] = "pass" if ms <= 0.7 else "warn"

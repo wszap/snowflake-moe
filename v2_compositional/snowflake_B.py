@@ -83,6 +83,11 @@ class SnowflakeB(nn.Module):
         # ---- one-hot 告警 ----
         self.sharp_warn = sharp_warn
         self.log_sharp = log_sharp
+        # ★ Bug5b: 逐步累计的 one-hot 告警计数。
+        #   run_metrics 每 100 步才采样一次，会漏掉 step10~90 的
+        #   sharp=0.75~0.97（采样点在 step0/100 恰好都低于阈值）。
+        #   这里逐步累计，finalize 时读取，保证计数不失真。
+        self.sharp_warn_count = 0
         # ---- 内生最低有效器官数约束（默认关闭，0=不启用）----
         self.min_eff_organs = int(min_eff_organs)
 
@@ -213,6 +218,8 @@ class SnowflakeB(nn.Module):
                       "wiring_var_norm": wvar / float(var_max),
                       "eff_organs": eff_n,
                       "mix_sharp": sharp}
+        if float(sharp) > self.sharp_warn:
+            self.sharp_warn_count += 1
         if self.log_sharp and float(sharp) > self.sharp_warn:
             print(f"[one-hot warning] mix_sharp={float(sharp):.3f} "
                   f"> {self.sharp_warn} ⇒ wiring 接近 one-hot，"

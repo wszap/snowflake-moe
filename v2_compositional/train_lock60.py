@@ -360,7 +360,7 @@ def main():
                 else:
                     print(f"[data] mojibake 修复无效({n0}->{n1})，保留原文",
                           flush=True)
-            except (UnicodeEncodeDecodeError, UnicodeDecodeError):
+            except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
                 print("[data] 非双重编码，跳过修复", flush=True)
         chars = sorted(set(txt))
         stoi = {c: i for i, c in enumerate(chars)}
@@ -480,7 +480,11 @@ def main():
             if step % 10 == 0 and step % 100 != 0:
                 # 轻量心跳：不调 loss.item()（DCU 上每次同步数十 ms，见 L-020）
                 print(f"  ...step {step} {(time.time()-t0):.0f}s", flush=True)
-            if step % 100 == 0:
+            # ★ Bug4: 原每 100 步才采一次，但 step0~100 内
+            #   eff 从 335 骤降到 113（早期剧变），论文要的
+            #   收敛曲线前段是空的。改为前 500 步每 10 步采一次。
+            _dense = (step < 500 and step % 10 == 0)
+            if step % 100 == 0 or _dense:
                 dg = model.agg_diag()
                 print(f"  ep{ep} step{step:>5} loss={loss.item():.4f} "
                       f"in_band={dg.get('in_band',0):.3f} "

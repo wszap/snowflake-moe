@@ -1,0 +1,50 @@
+{
+  "tag": "v3_topk_s0",
+  "config": {
+    "data": "data_25mb.txt",
+    "d": 128,
+    "n": 384,
+    "L": 4,
+    "h": 256,
+    "n_cells": 4,
+    "n_head": 4,
+    "scaffold_top_k": 32,
+    "select_mode": "topk",
+    "rank": 4,
+    "temp": 5.0,
+    "bs": 64,
+    "seq_len": 128,
+    "lr": 0.0003,
+    "max_steps": 3000,
+    "smoke": true,
+    "smoke_steps": 1,
+    "seed": 0,
+    "tag": "",
+    "bf16": true,
+    "fix_mojibake": false,
+    "no_leak_check": false,
+    "save_ckpt": "",
+    "outdir": "output/v3"
+  },
+  "vocab_size": 100,
+  "params": 12079589,
+  "start_loss": 4.627983093261719,
+  "final_loss": 4.627983093261719,
+  "val_loss": 4.11896665096283,
+  "ppl": 61.49566293618201,
+  "eff_organs_last": 6.57938814163208,
+  "var_norm_last": 0.13934534788131714,
+  "H2_按输入组合": "pass",
+  "elapsed_sec": 0.23357176780700684,
+  "leak_ok": true,
+  "history": [
+    {
+      "step": 0,
+      "loss": 4.627983093261719,
+      "lr": 0.0003,
+      "eff": 6.57938814163208,
+      "mix_sharp": 0.2932989299297333,
+      "var_norm": 0.13934534788131714
+    }
+  ]
+}
