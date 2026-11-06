@@ -55,6 +55,7 @@ def main():
     ap.add_argument("--smoke-steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--force-mix", choices=["none","uniform","onehot","argmax"], default="none")
+    ap.add_argument("--groups", type=int, default=0)
     ap.add_argument("--tag", default="")
     ap.add_argument("--no-bf16", dest="bf16", action="store_false",
                     default=True)
@@ -91,6 +92,7 @@ def main():
         select_mode=a.select_mode, variant=a.variant,
         shared_mult=a.shared_mult, seed=a.seed,
         clone_temp=a.clone_temp,
+        groups=a.groups,
     ).to(device)
 
     model._fm_mode = a.force_mix

@@ -1,0 +1,14 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[torch.float32 ] A全局=1.162e-02  B隔离=0.000e+00  C群内=4.036e-03  群外=0.000e+00  K=43
+    PASS  B  分裂严格不扰动旧 key
+    PASS  C  接线扰动严格锁在本群
+    PASS  A  对照组确有全局扰动
+    PASS  C  本群内确实建立了新连接（有意结果）
+    新细胞 key_new[n] = M_new[n] ? True
+[torch.float64 ] A全局=1.598e-02  B隔离=0.000e+00  C群内=3.942e-03  群外=0.000e+00  K=51
+    PASS  B  分裂严格不扰动旧 key
+    PASS  C  接线扰动严格锁在本群
+    PASS  A  对照组确有全局扰动
+    PASS  C  本群内确实建立了新连接（有意结果）
+    新细胞 key_new[n] = M_new[n] ? True

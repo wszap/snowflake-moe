@@ -1,0 +1,20 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+P 状态                        eff      比值min      比值max      全非零
+----------------------------------------------------------------
+正常                         1.00     0.9843     1.0025     True
+P×1e6                      1.00     0.9843     1.0025     True
+P×1e-6                     1.00     0.9843     1.0025     True
+P 全零                       1.00     1.0000     1.0000     True
+P 全塌成一行                    1.00     1.0000     1.0000     True
+P 每行随机重排                   1.00     0.9951     1.0008     True
+
+原 wiring eff = 1.00
+理论夹子 beta=0.1 → 比值 ∈ (0.909, 1.100), eff ∈ [0.83,1.21]×eff_orig
+判据：六档全部落在夹子内、全非零 → P 任意失控都 fail-safe to 原拼装
+
+=== 无熔断时软归属能推到多尖 ===
+  tau=0.1    A.max=0.5266  → 仍是软群
+  tau=0.05   A.max=0.8453  → 仍是软群
+  tau=0.02   A.max=0.9913  → 已接近选群 ⚠
+  tau=0.005  A.max=0.9999  → 已接近选群 ⚠

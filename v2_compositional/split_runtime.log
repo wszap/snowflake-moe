@@ -1,0 +1,22 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[0] 工作点 scale=0.15  eff=3.52  min(w)=1.07e-04
+[1] 主动触发=True  support=914.783  本群 K=55
+    分工卡 = {'id': 384, 'group': 6, 'parent': 0, 'birth': 300, 'fitness': 0.0, 'support': 0.0, 'w_child': 0.0017, 'teammates': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+Q1 Δ输出 = 0.000e+00
+Q3 旧细胞梯度差 = 0.000e+00
+Q2 w_child 0.01155 → 0.05000   ||U_new|| 0.0000 → 0.0029
+Q4 群内=3.749e-03  群外=0.000e+00
+Q5 min(w)=1.07e-04  全非零=True  eff=3.49
+
+================================================================
+  PASS  [0] 真实工作点 (2.5≤eff≤4.0)
+  PASS  [1] 主动触发（非 step 时钟）
+  PASS  Q1 分裂严格无扰动
+  PASS  Q3 旧细胞梯度严格不变
+  PASS  Q2 新细胞知识从零增长
+  PASS  Q2 接线份额被主动调高
+  PASS  Q4 接线扰动锁在本群
+  PASS  Q5 仍是拼（全非零 + eff>2）
+  PASS  Q5 新细胞有群标签
+  9/9 通过

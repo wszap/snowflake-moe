@@ -173,6 +173,13 @@ class SnowflakeB(nn.Module):
         C, P, _ = xc.shape
         xsum = xc.mean(1)
         wiring = F.softmax(xsum @ key.T / math.sqrt(self.d) * self.temp, dim=-1)
+        if getattr(self, "soft_groups", None) is not None:
+            # 群是【乘性结构先验】，不是路由：保住 wiring 尖锐度，全 n 权重恒非零
+            wiring, _wg = self.soft_groups.compose_prior(
+                wiring, xsum, self.organelle_memory, beta=0.1)
+            self._group_ent = float(
+                -(_wg * (_wg + 1e-9).log()).sum(-1).mean().detach()
+                / math.log(self.soft_groups.G))
         if getattr(self, "wiring_mode", "soft") == "argmax":
             # D 档：每个 chunk 按输入挑 1 个专家（真「选」），保留 per-chunk 差异
             wiring = F.one_hot(wiring.argmax(-1), self.n).to(wiring.dtype)

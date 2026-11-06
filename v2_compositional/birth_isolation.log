@@ -1,0 +1,11 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+A  connect() 全局重算      旧 key 扰动 = 1.162e-02   ← Q0 复现
+B  Schur 零补(出生隔离)    旧 key 扰动 = 5.722e-06   ← 严格 0
+C  主动接线(只接本群 K=43)  群内=4.037e-03  群外=5.722e-06
+
+================================================================
+  FAIL  B  分裂不扰动旧知识（代数恒等式，非近似）
+  FAIL  C  接线扰动严格锁在本群 → 群结构承担隔离
+  PASS  A  对照组确实有全局扰动
+  三条全过 = 「自主分裂 + 忆点高速连接 + 细胞群」不碰 wiring、不伤 val、零额外开销

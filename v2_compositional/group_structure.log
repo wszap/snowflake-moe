@@ -1,0 +1,12 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[1a] kNN 拉普拉斯前 12 = [0.0, 1.696, 1.74, 1.768, 1.837, 1.844, 1.862, 1.909, 1.948, 1.965, 1.989, 2.011]
+     <1.0 的个数(自然社区数) = 1
+[1b] 二值化 c: 前3=[0.0, 172.73, 174.46]  每行度≈248/384  → 稠密随机图，无社区
+[1c] 忆点余弦: mean=0.5014 std=0.0414 min=0.3045 max=0.6601  (全正 → 共享 base 主簇)
+[2] 群大小 = [184, 19, 7, 4, 5, 23, 37, 105]
+[3] A.max 均值: 随机P=0.1442  k-means P=0.1375  (1/G=0.1250)
+    判据: struct 明显高于 rand → 群质心承载了结构
+[4] eff: w_orig=6.82  w_struct(替换)=384.00  w_mix(乘性β=0.1)=6.82
+    min(w_mix)=1.77e-11  全非零=True
+    判据: eff(w_struct) >> eff(w_mix) ≈ eff(w_orig)  → 必须乘性，不能替换

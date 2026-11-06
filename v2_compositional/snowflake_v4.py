@@ -188,7 +188,7 @@ class SnowflakeLMV4(nn.Module):
                  seq_len=128, rank=4, temp=5.0, n_head=4,
                  scaffold_top_k=32, select_mode="soft",
                  variant="base", shared_mult=4, seed=0,
-                 risk_threshold=0.5, clone_temp=2.0):
+                 risk_threshold=0.5, clone_temp=2.0, groups=0):
         super().__init__()
         self.d = d
         self.L = L
@@ -228,6 +228,14 @@ class SnowflakeLMV4(nn.Module):
                 for ci in range(n_cells)
             ]) for li in range(L)
         ])
+        # ---- 软群：显式开关，默认关。挂在 optimizer 之前 → P 自动注册、可学习 ----
+        if groups > 0:
+            from organelle_groups import SoftGroups
+            for li in range(L):
+                for ci in range(n_cells):
+                    cell = self.layers[li][ci]
+                    cell.soft_groups = SoftGroups(d, n, G=groups, tau=0.10, temp_g=2.0)
+                    cell.soft_groups.init_from_memories(cell.organelle_memory)
 
         # ---- shared：共享全秩专家 ----
         self.shared = None
