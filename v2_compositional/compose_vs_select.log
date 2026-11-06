@@ -1,0 +1,13 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+Q1  合成专家 vs「最像的单个专家」余弦 = 1.0000 (max 1.0000)
+    远 < 1 → 拼出来的是库里【不存在】的新专家，不是从库里挑
+Q2  跨 chunk 平均余弦： 拼 A=-0.0001  静态 B=1.0000  选 C=-0.0001
+    A 介于 B/C 之间且随输入变化 → 动态拼装确实在发生
+Q3  ||UA-UC|| / ||UA|| = 0.0000
+    >0 → one-hot 丢失了其余 383 个专家的合成贡献
+Q4  top1 份额=1.0000  top2~4=0.0000  其余380个=0.0000
+    长尾非零 → 拼装中每个专家都在贡献，砍掉即破坏拼
+
+==============================================================
+  PASS 若 Q1<0.9 且 Q3>0：结构上「拼」不等于「选」

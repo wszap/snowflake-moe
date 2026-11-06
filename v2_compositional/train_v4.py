@@ -20,7 +20,7 @@ from snowflake_v4 import SnowflakeLMV4
 def _make_fm(model, x):
     """拼/选消融：只替换 wiring，其余完全不动。返回 None 或 [n] 向量。"""
     mode = getattr(model, "_fm_mode", "none")
-    if mode == "none":
+    if mode in ("none", "argmax"):
         return None
     n_org = model.layers[0][0].n
     if mode == "uniform":
@@ -54,7 +54,7 @@ def main():
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--smoke-steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--force-mix", choices=["none","uniform","onehot"], default="none")
+    ap.add_argument("--force-mix", choices=["none","uniform","onehot","argmax"], default="none")
     ap.add_argument("--tag", default="")
     ap.add_argument("--no-bf16", dest="bf16", action="store_false",
                     default=True)
@@ -94,6 +94,10 @@ def main():
     ).to(device)
 
     model._fm_mode = a.force_mix
+    for _li in range(len(model.layers)):
+        for _ci in range(len(model.layers[_li])):
+            model.layers[_li][_ci].wiring_mode = (
+                "argmax" if a.force_mix == "argmax" else "soft")
     if a.force_mix != "none":
         print("[ablation] force_mix =", a.force_mix, flush=True)
     params = sum(p.numel() for p in model.parameters())

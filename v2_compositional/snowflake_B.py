@@ -173,6 +173,9 @@ class SnowflakeB(nn.Module):
         C, P, _ = xc.shape
         xsum = xc.mean(1)
         wiring = F.softmax(xsum @ key.T / math.sqrt(self.d) * self.temp, dim=-1)
+        if getattr(self, "wiring_mode", "soft") == "argmax":
+            # D 档：每个 chunk 按输入挑 1 个专家（真「选」），保留 per-chunk 差异
+            wiring = F.one_hot(wiring.argmax(-1), self.n).to(wiring.dtype)
 
         # ---- 内生最低有效器官数约束：保证每样本至少真正用到 K 个器官 ----
         # 解决 sharp→1（384 选 1）的药方。见 D-005。
