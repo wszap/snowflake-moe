@@ -1,0 +1,82 @@
+{
+  "tag": "e3_smoke",
+  "mode": "split",
+  "config": {
+    "data": "data_25mb.txt",
+    "d": 256,
+    "n": 384,
+    "L": 4,
+    "h": 128,
+    "n_cells": 4,
+    "n_head": 4,
+    "scaffold_top_k": 32,
+    "select_mode": "soft",
+    "rank": 4,
+    "temp": 5.0,
+    "variant": "shared",
+    "shared_mult": 4,
+    "clone_temp": 2.0,
+    "bs": 8,
+    "seq_len": 128,
+    "lr": 0.0003,
+    "max_steps": 20,
+    "seed": 0,
+    "mode": "split",
+    "split_k": 8,
+    "split_at": 10,
+    "groups": 8,
+    "join_mode": "compete",
+    "tag": "e3_smoke",
+    "outdir": "output/v4"
+  },
+  "vocab_size": 100,
+  "params_start": 17225573,
+  "params_end": 17454949,
+  "start_loss": 4.781550884246826,
+  "final_loss": 3.1011300086975098,
+  "val_loss": 3.1317807912826536,
+  "ppl": 22.914749616531623,
+  "eff_organs_last": 8.074840545654297,
+  "var_norm_last": 0.011498469859361649,
+  "elapsed_sec": 1.9031157493591309,
+  "events": [
+    {
+      "step": 10,
+      "event": "divide",
+      "K": 8,
+      "parents": [
+        60,
+        237,
+        202,
+        320,
+        289,
+        4,
+        67,
+        8
+      ]
+    }
+  ],
+  "history": [
+    {
+      "step": 0,
+      "loss": 4.781550884246826,
+      "lr": 0.0003,
+      "eff": 6.104803562164307,
+      "var_norm": 0.14766614139080048
+    },
+    {
+      "step": 10,
+      "loss": 3.3682963848114014,
+      "lr": 2.9999999999999997e-05,
+      "eff": 8.118565559387207,
+      "var_norm": 0.012307114899158478
+    },
+    {
+      "step": 19,
+      "loss": 3.1011300086975098,
+      "lr": 2.9999999999999997e-05,
+      "eff": 8.074840545654297,
+      "var_norm": 0.011498469859361649
+    }
+  ]
+}
