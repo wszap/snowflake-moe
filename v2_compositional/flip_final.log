@@ -1,0 +1,15 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+  α(x) abs.mean      = 0.2420
+  α 随输入 max|Δ|    = 1.815e-02
+  F=1.000000  pos=1.000000  gate=1.13e-07
+  diag.alpha_mean    = 0.2420  (有符号 mean，仅参考，不作判据)
+
+  PASS  默认严格恒等
+  PASS  默认与原版逐位一致
+  PASS  α 真转起来 (abs.mean>0.05)
+  PASS  严格保范数 (Frobenius)
+  PASS  gate 在严格无损窗口 <3e-4
+  PASS  逐位置也守恒
+  PASS  ★ α 由输入驱动（解耦价值）
+  7/7 通过

@@ -1,0 +1,33 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+==============================================================================
+[1] 同一个 f，α 真转起来：两种口径都应严格 1
+  alpha_bias=0.0           F=1.000000  pos=1.000000  Σ差=-5.913e-05  max|Δ|=2.861e-06  α=0.0000  gate=1.13e-07
+     ny[:2,:4] = [15.028, 17.426, 16.835, 16.406, 15.643, 15.725, 16.36, 16.061]
+  alpha_bias=0.5           F=1.000000  pos=1.000000  Σ差=-5.150e-05  max|Δ|=3.815e-06  α=0.1452  gate=1.13e-07
+  alpha_bias=1.0           F=1.000000  pos=1.000000  Σ差=-5.436e-05  max|Δ|=3.815e-06  α=0.2393  gate=1.13e-07
+  alpha_bias=3.0           F=1.000000  pos=1.000000  Σ差=-5.531e-05  max|Δ|=3.815e-06  α=0.3126  gate=1.13e-07
+
+[2] gate 扫描（Frobenius 口径，重定 gate_max）
+   seal_bias   gate_mean     ‖y‖F/‖x‖F        判定
+          -8      0.0000        1.0000        无损
+          -4      0.0003        0.9997        无损
+          -2      0.0180        0.9821        无损
+          -1      0.1192        0.8811        有损
+           0      0.5000        0.5026        有损
+           1      0.8808        0.1305        有损
+           2      0.9820        0.0708        有损
+           4      0.9997        0.0603        有损
+           8      1.0000        0.0500        有损
+  → gate_max ≈ 1.80e-02  （覆盖旧 flip_gate.log 的 ratio 列）
+
+[3] α 解耦复核
+  PASS  默认严格恒等
+  PASS  默认与原版逐位一致
+  FAIL  α 真转 > 0.05
+  PASS  严格保范数 (Frobenius)
+  PASS  gate 在无损窗口
+  PASS  逐位置也守恒
+  5/6 通过
+
+完成：[1] 两种口径都=1 → mean 矛盾消解；[2] gate_max 重定；[3] 解耦复核

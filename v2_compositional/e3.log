@@ -1,0 +1,18 @@
+nohup: 忽略输入
+########## E3 384→392 但新细胞进正常竞争（E1 的干净对照）##########
+  exit=0
+[one-hot warning] mix_sharp=0.767 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+[one-hot warning] mix_sharp=0.726 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+  step   500  loss=1.6649  eff=3.5
+  step  1000  loss=1.5168  eff=3.4
+[split] step 1500  384→392  params=17,454,949
+  step  1500  loss=1.6207  eff=4.9
+  step  2000  loss=1.3267  eff=3.7
+  step  2500  loss=1.2412  eff=3.7
+
+====================================================================
+  [b5_E3_compete] val = 1.1953  ppl = 3.3044   eff=3.7715699672698975  var_norm=0.25589680671691895
+  params 17,225,573 → 17,454,949   用时 273.6s
+====================================================================
+[saved] output/v4/b5_E3_compete.json
+E3_DONE

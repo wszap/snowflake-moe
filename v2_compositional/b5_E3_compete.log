@@ -1,0 +1,18 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[data] 25,000,049 tokens  vocab=100  train=22,500,044 val=2,500,005  (25,035,796 bytes)
+  step     0  loss=4.7996  eff=6.4
+[one-hot warning] mix_sharp=0.767 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+[one-hot warning] mix_sharp=0.726 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+  step   500  loss=1.6649  eff=3.5
+  step  1000  loss=1.5168  eff=3.4
+[split] step 1500  384→392  params=17,454,949
+  step  1500  loss=1.6207  eff=4.9
+  step  2000  loss=1.3267  eff=3.7
+  step  2500  loss=1.2412  eff=3.7
+
+====================================================================
+  [b5_E3_compete] val = 1.1953  ppl = 3.3044   eff=3.7715699672698975  var_norm=0.25589680671691895
+  params 17,225,573 → 17,454,949   用时 273.6s
+====================================================================
+[saved] output/v4/b5_E3_compete.json

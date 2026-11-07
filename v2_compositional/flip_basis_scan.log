@@ -1,0 +1,24 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+=== 逐个 f：基正交性 + 两种口径 + 逐位置差 ===
+
+  f#0 ab=0.0  α=0.0000 gate=1.13e-07
+    基   ‖s‖=1.000000 ‖e‖=1.000000 ⟨s,e⟩=+0.000000 ⟨s,u⟩=+0.000000 ⟨e,u⟩=+0.000000
+    范数 global=1.000000 mean=1.000000 Σ²差=+1.110e-16 Σ差=+3.638e-12 max|Δ|=3.638e-12 正/负=1/0
+
+  f#1 ab=0.5  α=0.1452 gate=1.13e-07
+    基   ‖s‖=1.000000 ‖e‖=1.000000 ⟨s,e⟩=-0.000000 ⟨s,u⟩=-0.000000 ⟨e,u⟩=+0.000000
+    范数 global=1.000000 mean=0.745908 Σ²差=-1.029e-10 Σ差=-3.870e-06 max|Δ|=3.870e-06 正/负=0/1
+
+  f#2 ab=1.0  α=0.2393 gate=1.13e-07
+    基   ‖s‖=1.000000 ‖e‖=1.000000 ⟨s,e⟩=+0.000000 ⟨s,u⟩=-0.000000 ⟨e,u⟩=-0.000000
+    范数 global=1.000000 mean=0.668495 Σ²差=-1.283e-10 Σ差=-5.049e-06 max|Δ|=5.049e-06 正/负=0/1
+
+  f#3 ab=3.0  α=0.3126 gate=1.13e-07
+    基   ‖s‖=1.000000 ‖e‖=1.000000 ⟨s,e⟩=-0.000000 ⟨s,u⟩=+0.000000 ⟨e,u⟩=+0.000000
+    范数 global=1.000000 mean=0.552004 Σ²差=-1.613e-10 Σ差=-6.823e-06 max|Δ|=6.823e-06 正/负=0/1
+
+判读：
+  f#1~3 基仍正交且 max|Δ|≈0 → mean 纯属跨实例口径伪影，弃用 mean
+  f#1~3 ⟨s,e⟩或‖s‖明显偏离 → _gram_schmidt 的 +1e-8 退化，是可修的实现 bug
+  max|Δ|大且正负都有、Σ²差≈0 → 那几档确有跨位置重分配，单独命名，不泛化

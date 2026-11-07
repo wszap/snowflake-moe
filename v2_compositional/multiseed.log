@@ -1,0 +1,14 @@
+nohup: 忽略输入
+########## seed=1  mode=split join=share tag=ms_s1_E1 ##########
+  exit=0  val=1.2385
+########## seed=1  mode=split join=compete tag=ms_s1_E3 ##########
+  exit=0  val=1.2405
+########## seed=1  mode=nosplit join=share tag=ms_s1_E1p ##########
+  exit=0  val=1.2547
+########## seed=2  mode=split join=share tag=ms_s2_E1 ##########
+  exit=0  val=1.2216
+########## seed=2  mode=split join=compete tag=ms_s2_E3 ##########
+  exit=0  val=1.2247
+########## seed=2  mode=nosplit join=share tag=ms_s2_E1p ##########
+  exit=0  val=1.2443
+MULTISEED_DONE

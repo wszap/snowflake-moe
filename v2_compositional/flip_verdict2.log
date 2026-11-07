@@ -1,0 +1,16 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+=== ① 复刻 step17b 的抽签顺序：连建 4 个 f ===
+  f#0 ab=0.0  global=1.000000  mean=1.000000  α=0.0000
+  f#1 ab=0.5  global=1.000000  mean=0.745908  α=0.1452
+  f#2 ab=1.0  global=1.000000  mean=0.668495  α=0.2393
+  f#3 ab=3.0  global=1.000000  mean=0.552004  α=0.3126
+
+=== ② 同一个 f：逐位置范数差（逐位置守恒则全 0）===
+  ab=0.0  Σ‖y‖²−Σ‖x‖²=+1.110e-16  Σ‖y‖−Σ‖x‖=+3.638e-12  逐位置 max|Δ|=3.638e-12  正/负个数=1/0
+  ab=1.0  Σ‖y‖²−Σ‖x‖²=-6.572e-11  Σ‖y‖−Σ‖x‖=-2.337e-06  逐位置 max|Δ|=2.337e-06  正/负个数=0/1
+  ab=3.0  Σ‖y‖²−Σ‖x‖²=+7.827e-11  Σ‖y‖−Σ‖x‖=+2.383e-06  逐位置 max|Δ|=2.383e-06  正/负个数=1/0
+
+判读：
+  逐位置 max|Δ|≈0  → mean 的跳是口径数学性质，无跨位置耦合
+  逐位置 max|Δ|>0 且有正有负 → 确有跨位置重分配，就是翻盖在做的事
