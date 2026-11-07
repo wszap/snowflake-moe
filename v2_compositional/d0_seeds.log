@@ -1,0 +1,6 @@
+nohup: 忽略输入
+########## seed=1  D0 dummy ##########
+  exit=0
+########## seed=2  D0 dummy ##########
+  exit=0
+D0_SEEDS_DONE

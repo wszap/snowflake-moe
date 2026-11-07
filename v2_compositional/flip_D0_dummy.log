@@ -1,0 +1,17 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[data] 25,000,049 tokens  vocab=100  train=22,500,044 val=2,500,005  (25,035,796 bytes)
+[dummy_ab] L=4 dev=cuda:0
+  step     0  loss=4.7998  eff=6.4
+  step   500  loss=1.6813  eff=3.3
+  step  1000  loss=1.5329  eff=3.0
+[split] step 1500  384→392  params=17,984,365
+  step  1500  loss=1.4557  eff=3.0
+  step  2000  loss=1.3290  eff=2.9
+  step  2500  loss=1.2472  eff=2.9
+
+====================================================================
+  [flip_D0_dummy] val = 1.1998  ppl = 3.3194   eff=2.9463491439819336  var_norm=0.3071593642234802
+  params 17,754,989 → 17,984,365   用时 377.0s
+====================================================================
+[saved] output/v4/flip_D0_dummy.json

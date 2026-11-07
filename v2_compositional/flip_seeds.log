@@ -1,0 +1,6 @@
+nohup: 忽略输入
+########## seed=1  F1 decoupled ##########
+  exit=0
+########## seed=2  F1 decoupled ##########
+  exit=0
+FLIP_SEEDS_DONE
