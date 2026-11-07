@@ -167,7 +167,12 @@ class SnowflakeB(nn.Module):
     def forward(self, x, perm=None, force_mix=None):
         N, d = x.shape
         c, cm = self.connect()
+        if getattr(self, "_split_c", None) is not None:
+            c = self._split_c                  # c 慢变量：结构冻结（detach 常量）
+            self.heal_term = None              # 键长回复力交给群内接线，避免 n 变导致 loss 漂
         key = self.organelle_memory + c.T @ self.organelle_memory   # 务必 c.T
+        if getattr(self, "_split_n0", 0) > 0:
+            key = key[:self._split_n0]        # 新细胞不抢名额；M 仍可导
 
         xc = self._chunk_view(x)
         C, P, _ = xc.shape
@@ -194,6 +199,9 @@ class SnowflakeB(nn.Module):
             wiring = fm.to(wiring.dtype).expand(C, -1)
         elif perm is not None:
             wiring = wiring[perm]
+        if getattr(self, "_split_child_w", None) is not None:
+            cw = self._split_child_w.to(wiring.dtype).unsqueeze(0).expand(C, -1)
+            wiring = torch.cat([wiring, cw], -1)   # 仍是拼：全 n 个权重恒非零
 
         # ---- B 型合成：先合参数，再前向一次（成本与 batch 解耦）----
         U1 = torch.matmul(wiring, self.W1_U.view(self.n, -1)).view(-1, self.d, self.rank)          # [C,d,r]

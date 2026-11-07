@@ -1,0 +1,18 @@
+nohup: 忽略输入
+########## E1' 补跑（392 不分裂，冻结 c 与 E1 对称）##########
+  exit=0
+  import pynvml  # type: ignore[import]
+[data] 25,000,049 tokens  vocab=100  train=22,500,044 val=2,500,005  (25,035,796 bytes)
+  step     0  loss=4.8239  eff=6.1
+  step   500  loss=1.7093  eff=3.3
+  step  1000  loss=1.5767  eff=3.2
+  step  1500  loss=1.4935  eff=3.1
+  step  2000  loss=1.3714  eff=3.3
+  step  2500  loss=1.2907  eff=3.3
+
+====================================================================
+  [b5_E1p_nosplit] val = 1.2389  ppl = 3.4519   eff=3.4537599086761475  var_norm=0.27919039130210876
+  params 17,454,949 → 17,454,949   用时 266.3s
+====================================================================
+[saved] output/v4/b5_E1p_nosplit.json
+E1P_DONE

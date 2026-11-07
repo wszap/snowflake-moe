@@ -1,0 +1,205 @@
+# -*- coding: utf-8 -*-
+"""B5：主动分裂 vs 不分裂 vs 从头。三档同 seed/同步数/同最终忆点数。
+不改 train_v4.py；数据管线复用 train_v3.load_data / evaluate。
+"""
+import argparse, json, math, os, time
+import torch, torch.nn as nn, torch.nn.functional as F
+from train_v3 import load_data, evaluate
+from snowflake_v4 import SnowflakeLMV4
+from organelle_registry import OrganelleRegistry
+from organelle_groups import SoftGroups
+
+
+def all_cells(model):
+    return [c for layer in model.layers for c in layer]
+
+
+def build(a, vocab, n_start, device):
+    return SnowflakeLMV4(
+        vocab_size=vocab, d=a.d, n=n_start, L=a.L, h=a.h,
+        n_cells=a.n_cells, seq_len=a.seq_len, rank=a.rank, temp=a.temp,
+        n_head=a.n_head, scaffold_top_k=a.scaffold_top_k,
+        select_mode=a.select_mode, variant=a.variant,
+        shared_mult=a.shared_mult, seed=a.seed,
+        clone_temp=a.clone_temp, groups=0).to(device)
+
+
+def do_split(model, cells, a, n0, K, reg, peers_of, device, lr):
+    """扩 5 个按 n 索引的张量 + Schur 零补 c + 重建 optimizer。"""
+    for c in cells:
+        M = c.organelle_memory.detach()
+        r = c.W1_U.shape[-1]; h = c.W2_U.shape[1]; d = c.W1_U.shape[1]
+        # 主动：由自身 fitness 选最忙的 K 个母体（非 step 指定）
+        busy = torch.topk(reg.fitness[:n0], K).indices.tolist()
+        NM = torch.stack([
+            F.normalize(M[p] + 0.3 * torch.randn(d, device=device), dim=0)
+            for p in busy])
+        with torch.no_grad():
+            c.organelle_memory = nn.Parameter(torch.cat([M, NM], 0))
+            c.W1_U = nn.Parameter(torch.cat([c.W1_U.data, torch.zeros(K, d, r, device=device)], 0))
+            c.W2_U = nn.Parameter(torch.cat([c.W2_U.data, torch.zeros(K, h, r, device=device)], 0))
+            c.register_buffer('mix_ema', torch.cat([c.mix_ema, torch.zeros(K, device=device)]))
+            c.register_buffer('fitness_ema', torch.cat([c.fitness_ema, torch.zeros(K, device=device)]))
+            c.n = n0 + K
+            cc = torch.zeros(n0 + K, n0 + K, device=device)
+            cc[:n0, :n0] = c._split_c                       # ★ 旧块原封不动
+            c._split_c = cc
+            c._split_child_w = torch.full((K,), 0.0017, device=device)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
+    return opt, busy
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--d", type=int, default=256)
+    ap.add_argument("--n", type=int, default=384)
+    ap.add_argument("--L", type=int, default=4)
+    ap.add_argument("--h", type=int, default=128)
+    ap.add_argument("--n-cells", type=int, default=4)
+    ap.add_argument("--n-head", type=int, default=4)
+    ap.add_argument("--scaffold-top-k", type=int, default=32)
+    ap.add_argument("--select-mode", default="soft")
+    ap.add_argument("--rank", type=int, default=4)
+    ap.add_argument("--temp", type=float, default=5.0)
+    ap.add_argument("--variant", default="shared")
+    ap.add_argument("--shared-mult", type=int, default=4)
+    ap.add_argument("--clone-temp", type=float, default=2.0)
+    ap.add_argument("--bs", type=int, default=64)
+    ap.add_argument("--seq-len", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--max-steps", type=int, default=3000)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--mode", choices=["split", "nosplit", "fromscratch"], required=True)
+    ap.add_argument("--split-k", type=int, default=8)
+    ap.add_argument("--split-at", type=int, default=1500)
+    ap.add_argument("--groups", type=int, default=8)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--outdir", default="output/v4")
+    a = ap.parse_args()
+
+    torch.manual_seed(a.seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed(a.seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    bf16 = device == "cuda"
+    max_steps = a.max_steps
+    tag = a.tag or ("b5_%s_s%d" % (a.mode, a.seed))
+
+    get_batch, vocab = load_data(a.data, a.seq_len, a.bs, False)
+    n0, K = a.n, a.split_k
+    n_start = n0 if a.mode in ("split", "nosplit") else n0 + K
+    model = build(a, vocab, n_start, device)
+    cells = all_cells(model)
+    params0 = sum(p.numel() for p in model.parameters())
+
+    # ---- 分裂/不分裂两档：冻结 c（对称），n0 固定 ----
+    reg, peers_of, wired = None, {}, False
+    if a.mode in ("split", "nosplit"):
+        for c in cells:
+            cc, _ = c.connect()
+            c._split_c = cc.detach().clone()
+            c._split_n0 = n0
+            c._split_child_w = None
+        M0 = cells[0].organelle_memory.detach()
+        g = SoftGroups(a.d, n0, G=a.groups, tau=0.10)
+        g.init_from_memories(M0)
+        gid = g.membership(M0).argmax(-1)
+        peers_of = {int(gg): (gid == gg).nonzero().flatten() for gg in range(a.groups)}
+        reg = OrganelleRegistry(a.d, n0, n_max=n0 + K)
+        reg.group_id[:n0] = gid
+
+    warm = max(1, max_steps // 10)
+    def lr_at(s):
+        w = min(s / warm, 1.0)
+        return a.lr * (0.1 + 0.9 * (0.5 * (1 + math.cos(math.pi * w))))
+
+    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.01, betas=(0.9, 0.95))
+    model.train()
+    t0 = time.time(); start_loss = final_loss = None
+    hist, events = [], []
+    busy = []
+
+    for step in range(max_steps):
+        lr = lr_at(step)
+        for pg in opt.param_groups: pg["lr"] = lr
+        x, y = get_batch("train"); x, y = x.to(device), y.to(device)
+
+        # ---- 主动分裂 ----
+        if a.mode == "split" and step == a.split_at:
+            opt, busy = do_split(model, cells, a, n0, K, reg, peers_of, device, lr)
+            events.append(dict(step=step, event="divide", K=K, parents=busy))
+            print("[split] step %d  %d→%d  params=%s" %
+                  (step, n0, n0 + K, format(sum(p.numel() for p in model.parameters()), ",")), flush=True)
+        # ---- 三档都在同一步重建 optimizer（对称，消除动量差异）----
+        elif step == a.split_at:
+            opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
+
+        # ---- 主动接线：份额由自身忆点命中率；秩-1 只落本群（一次）----
+        if a.mode == "split" and step >= a.split_at:
+            with torch.no_grad():
+                B, T = x.shape
+                pos = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
+                emb = model.in_proj(model.embed(x) + model.pos(pos)).reshape(-1, a.d)
+                w_old = cells[0]._last_mix[:, :n0] if cells[0]._last_mix is not None else None
+                if w_old is not None:
+                    reg.observe(emb.detach(), w_old, step)
+                for k in range(K):
+                    j = n0 + k
+                    wc = reg.wire_in(j, emb.detach(), cells[0].organelle_memory, eta=0.02, cap=0.05)
+                    for c in cells: c._split_child_w[k] = wc
+                if not wired:
+                    for k in range(K):
+                        j = n0 + k
+                        parent = busy[k] if k < len(busy) else 0
+                        gid_p = int(reg.group_id[parent]); peers = peers_of[gid_p]
+                        for c in cells:
+                            cc = c._split_c
+                            cc[j, peers] = 1.0 / len(peers)
+                            cc[j] /= cc[j].sum()
+                    events.append(dict(step=step, event="wire", child_w=[round(v, 5) for v in
+                                       cells[0]._split_child_w.tolist()]))
+                    wired = True
+
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+            logits, diag = model(x)
+        loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), y.view(-1))
+        hs = model.heal_sum()
+        if hs is not None: loss = loss + hs
+        opt.zero_grad(set_to_none=True); loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
+        lv = loss.item()
+        if start_loss is None: start_loss = lv
+        final_loss = lv
+        if step % 10 == 0 or step == max_steps - 1:
+            eff = diag.get("eff_organs"); vn = diag.get("wiring_var_norm")
+            hist.append(dict(step=step, loss=lv, lr=lr,
+                             eff=float(eff) if eff is not None else None,
+                             var_norm=float(vn) if vn is not None else None))
+            if step % 500 == 0:
+                print("  step %5d  loss=%.4f  eff=%s" % (step, lv, "%.1f" % eff if eff else "-"), flush=True)
+
+    val = evaluate(model, get_batch, 20, device, bf16)
+    params1 = sum(p.numel() for p in model.parameters())
+    vn_last = next((h["var_norm"] for h in reversed(hist) if h["var_norm"] is not None), None)
+    eff_last = next((h["eff"] for h in reversed(hist) if h["eff"] is not None), None)
+    print("\n" + "=" * 68)
+    print("  [%s] val = %.4f  ppl = %.4f   eff=%s  var_norm=%s" %
+          (tag, val, math.exp(val), eff_last, vn_last))
+    print("  params %s → %s   用时 %.1fs" %
+          (format(params0, ","), format(params1, ","), time.time() - t0))
+    print("=" * 68)
+
+    os.makedirs(a.outdir, exist_ok=True)
+    rec = dict(tag=tag, mode=a.mode, config=vars(a), vocab_size=vocab,
+               params_start=params0, params_end=params1,
+               start_loss=start_loss, final_loss=final_loss,
+               val_loss=val, ppl=math.exp(val),
+               eff_organs_last=eff_last, var_norm_last=vn_last,
+               elapsed_sec=time.time() - t0, events=events, history=hist)
+    out = os.path.join(a.outdir, "%s.json" % tag)
+    json.dump(rec, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    print("[saved] %s" % out)
+
+
+if __name__ == "__main__":
+    main()

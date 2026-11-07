@@ -1,0 +1,16 @@
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+==============================================================================
+① 默认(恒等起步)               ‖y‖/‖x‖=1.000000  Δmax=4.768e-07  gate=1.13e-07  α=0.000e+00
+② 只旋转(gate≈0)            ‖y‖/‖x‖=0.999999  Δmax=5.960e-07  gate=1.13e-07  α=1.159e-07
+③ 只扣留(inject=0)          ‖y‖/‖x‖=0.017380  Δmax=4.181e+00  gate=1.00e+00  α=0.000e+00
+④ 扣留+位置均值补偿              ‖y‖/‖x‖=0.253193  Δmax=3.865e+00  gate=1.00e+00  α=0.000e+00
+
+==============================================================================
+  PASS  ① 恒等起步 y≈x（零初始化 + gate≈0）
+  PASS  ① gate 起步 < 1e-5
+  PASS  ② 纯旋转严格保范数（Givens）
+  PASS  ③ 扣留阶段信息被兜住（‖y‖<‖x‖）
+  PASS  ④ 位置均值补偿无法完全还原（有损重分配）
+  5/5 通过
+  含义：旋转=加速(不改信息量)；gate+carry=跨位置重分配(终点需 A/B 实测)

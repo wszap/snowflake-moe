@@ -1,0 +1,46 @@
+nohup: 忽略输入
+########## E1 主动分裂 384->392 ##########
+  exit=0  (b5_E1_split.log)
+[one-hot warning] mix_sharp=0.767 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+[one-hot warning] mix_sharp=0.726 > 0.7 ⇒ wiring 接近 one-hot，『连续组合』叙事可能不成立。先查数据分离度(见 --sep)，再改 temp。
+  step   500  loss=1.6649  eff=3.5
+  step  1000  loss=1.5168  eff=3.4
+[split] step 1500  384→392  params=17,454,949
+  step  1500  loss=1.4427  eff=3.3
+  step  2000  loss=1.3202  eff=3.1
+  step  2500  loss=1.2316  eff=3.1
+
+====================================================================
+  [b5_E1_split] val = 1.1926  ppl = 3.2956   eff=3.1871190071105957  var_norm=0.28065475821495056
+  params 17,225,573 → 17,454,949   用时 287.9s
+====================================================================
+[saved] output/v4/b5_E1_split.json
+########## E1' 不分裂对照 ##########
+  exit=1  (b5_E1p_nosplit.log)
+/usr/local/lib/python3.11/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[data] 25,000,049 tokens  vocab=100  train=22,500,044 val=2,500,005  (25,035,796 bytes)
+Traceback (most recent call last):
+  File "/mnt/workspace/snowflake-moe/v2_compositional/train_split.py", line 237, in <module>
+    main()
+  File "/mnt/workspace/snowflake-moe/v2_compositional/train_split.py", line 119, in main
+    reg.group_id[:n0] = gid.cpu()
+    ~~~~~~~~~~~~^^^^^
+RuntimeError: The expanded size of the tensor (384) must match the existing size (392) at non-singleton dimension 0.  Target sizes: [384].  Tensor sizes: [392]
+########## E2 从头 392 ##########
+  exit=0  (b5_E2_fromscratch.log)
+  import pynvml  # type: ignore[import]
+[data] 25,000,049 tokens  vocab=100  train=22,500,044 val=2,500,005  (25,035,796 bytes)
+  step     0  loss=4.8173  eff=6.0
+  step   500  loss=1.7065  eff=3.4
+  step  1000  loss=1.5432  eff=3.3
+  step  1500  loss=1.4721  eff=3.4
+  step  2000  loss=1.3291  eff=3.4
+  step  2500  loss=1.2431  eff=3.6
+
+====================================================================
+  [b5_E2_fromscratch] val = 1.2414  ppl = 3.4604   eff=3.6948695182800293  var_norm=0.26145419478416443
+  params 17,454,949 → 17,454,949   用时 276.5s
+====================================================================
+[saved] output/v4/b5_E2_fromscratch.json
+B5_DONE
