@@ -1,0 +1,122 @@
+{
+  "tag": "st25_smoke",
+  "mode": "split",
+  "config": {
+    "data": "data_25mb.txt",
+    "d": 256,
+    "n": 384,
+    "L": 4,
+    "h": 128,
+    "n_cells": 4,
+    "n_head": 4,
+    "scaffold_top_k": 32,
+    "select_mode": "soft",
+    "rank": 4,
+    "temp": 5.0,
+    "variant": "shared",
+    "shared_mult": 4,
+    "clone_temp": 2.0,
+    "bs": 8,
+    "seq_len": 128,
+    "lr": 0.0003,
+    "max_steps": 20,
+    "seed": 0,
+    "mode": "split",
+    "split_k": 8,
+    "split_at": 10,
+    "groups": 8,
+    "join_mode": "share",
+    "cell_type": "v10",
+    "h_cell": 3,
+    "compose_k": 16,
+    "compose_renorm": 1,
+    "compose_chunk": 1,
+    "mem_budget": 256.0,
+    "wiring_mod": "none",
+    "clip_mode": "global",
+    "tag": "st25_smoke",
+    "outdir": "output/v4"
+  },
+  "vocab_size": 100,
+  "params_start": 17205109,
+  "params_end": 17434485,
+  "start_loss": 4.959132671356201,
+  "final_loss": 3.109661817550659,
+  "val_loss": 3.1495550870895386,
+  "ppl": 23.325684373846595,
+  "eff_organs_last": 2.411731004714966,
+  "var_norm_last": 0.15025289356708527,
+  "composed_width": 48.0,
+  "clip_mode": "global",
+  "clip_main_mean": 2.2125884115695955,
+  "compose_chunk": 1,
+  "compose_k": 16,
+  "h_cell": 3,
+  "avg_step_ms": 138.37889432907104,
+  "clip_expert_mean": null,
+  "elapsed_sec": 2.7675793170928955,
+  "events": [
+    {
+      "step": 10,
+      "event": "divide",
+      "K": 8,
+      "parents": [
+        60,
+        237,
+        202,
+        289,
+        67,
+        272,
+        4,
+        125
+      ],
+      "cell_type": "v10"
+    },
+    {
+      "step": 10,
+      "event": "wire",
+      "child_w": [
+        0.01368,
+        0.01226,
+        0.01295,
+        0.01277,
+        0.01274,
+        0.01205,
+        0.01323,
+        0.01356
+      ]
+    }
+  ],
+  "history": [
+    {
+      "step": 0,
+      "loss": 4.959132671356201,
+      "lr": 0.0003,
+      "eff": 4.441713809967041,
+      "var_norm": 0.17923827469348907,
+      "composed_width": 48.0,
+      "clip_main": 5.242483139038086,
+      "clip_expert": null
+    },
+    {
+      "step": 10,
+      "loss": 3.413600206375122,
+      "lr": 2.9999999999999997e-05,
+      "eff": 1.8533523082733154,
+      "var_norm": 0.1394704133272171,
+      "composed_width": 48.0,
+      "clip_main": 1.9947712421417236,
+      "clip_expert": null
+    },
+    {
+      "step": 19,
+      "loss": 3.109661817550659,
+      "lr": 2.9999999999999997e-05,
+      "eff": 2.411731004714966,
+      "var_norm": 0.15025289356708527,
+      "composed_width": 48.0,
+      "clip_main": 1.6754164695739746,
+      "clip_expert": null
+    }
+  ]
+}

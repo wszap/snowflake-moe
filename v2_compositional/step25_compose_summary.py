@@ -1,0 +1,151 @@
+# -*- coding: utf-8 -*-
+"""paperplaneMoe / step25 判据：只读 json，不重跑训练。
+
+主判据：同 seed 配对差 → 配对 t（df=n-1）→ 三族 Holm 校正。
+探索性：CUPED（用基线档 final_loss 作预实验协变量减方差）。
+口径：一律 mean±std + t + p；不拿单 seed 当结论。
+"""
+import json
+import math
+import os
+import statistics as st
+
+V4 = os.environ.get("V4DIR", "output/v4")
+ALPHA = 0.05
+
+TRIPLES = [
+    ("st25_s{0}_B", "st25_s{0}_V10w48", "st25_s{0}_V10iso"),
+]
+FAMILIES = [
+    ("V10(global) − B  [主判据:纯架构]", 1, 0),
+    ("V10(grouped) − B [架构+裁剪]", 2, 0),
+    ("grouped − global  [探索:裁剪净效应]", 2, 1),
+]
+
+
+def load(tag):
+    p = os.path.join(V4, tag + ".json")
+    if not os.path.exists(p):
+        raise SystemExit("缺 " + p + "  → 实验还没跑完")
+    return json.load(open(p, encoding="utf-8"))
+
+
+def p_two_sided(t, df):
+    try:
+        from scipy.stats import t as tdist
+        return 2.0 * float(tdist.sf(abs(t), df))
+    except Exception:
+        return None                      # 无 scipy：用临界值表判定
+
+
+CRIT = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+        6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+        11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131}
+
+
+def paired_t(ds):
+    n = len(ds)
+    assert n >= 2, "至少 2 个配对 seed"
+    m, s = st.mean(ds), st.stdev(ds)
+    if s == 0:
+        return m, float("inf"), n - 1, 0.0
+    t = m / (s / math.sqrt(n))
+    return m, t, n - 1, p_two_sided(t, n - 1)
+
+
+def cov(a, b):
+    ma, mb = st.mean(a), st.mean(b)
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (len(a) - 1)
+
+
+def main():
+    seeds, rows = [], []
+    s = 0
+    while os.path.exists(os.path.join(V4, "st25_s%d_B.json" % s)):
+        t = [q.format(s) for q in TRIPLES[0]]
+        vals = [load(q)["val_loss"] for q in t]
+        finals = [load(q)["final_loss"] for q in t]
+        seeds.append(s)
+        rows.append((vals, finals))
+        s += 1
+    assert rows, "没有 st25_s0_B.json"
+
+    n = len(rows)
+    if n == 1:
+        print("\n===== 单 seed 效应量预览（n=1，跳过 t / Holm / CUPED）=====")
+        for name, i, j in FAMILIES:
+            d = rows[0][0][i] - rows[0][0][j]
+            print("  %-30s %+.4f" % (name, d))
+        print("  噪声带 0.021（B5 跨 seed std 0.023）→ 幅度远超噪声，方向可读")
+        print("  显著性需 >=2 个配对 seed；补 seed 前不报 p")
+        return
+    print("seed  " + "  ".join("%-12s" % q for q in
+                              ("B", "V10w48", "V10iso")) + "   配对差(D−B)")
+    for s, (v, _) in zip(seeds, rows):
+        print("  %-4d %s   %+.4f" %
+              (s, "  ".join("%-12.4f" % q for q in v), v[2] - v[0]))
+
+    print("\n===== 三族配对检验（主判据）=====")
+    results = []
+    for name, i, j in FAMILIES:
+        ds = [v[i] - v[j] for v, _ in rows]
+        m, t, df, p = paired_t(ds)
+        sd = st.stdev(ds) if len(ds) > 1 else 0.0
+        d_cohen = m / sd if sd > 0 else float("inf")
+        crit = CRIT.get(df, 2.0)
+        results.append((name, m, sd, t, df, p, crit, d_cohen))
+        print("  %-30s %+.4f ± %.4f  t=%+.3f df=%d  p=%s  d=%.2f" %
+              (name, m, sd, t, df,
+               "%.4f" % p if p is not None else "n/a", d_cohen))
+
+    print("\n===== Holm 校正 (alpha=%.2f, m=%d) =====" % (ALPHA, len(results)))
+    order = sorted(range(len(results)),
+                   key=lambda i: (results[i][5] if results[i][5] is not None
+                                  else 1.0))
+    for rank, idx in enumerate(order):
+        name, m, sd, t, df, p, crit, dc = results[idx]
+        thr = ALPHA / (len(results) - rank)
+        if p is not None:
+            ok = p <= thr
+            verdict = "PASS" if ok else "fail"
+        else:
+            ok = abs(t) > crit
+            verdict = ("PASS(临界值)" if ok else "fail(临界值)")
+        print("  %-30s p=%s  Holm阈值=%.4f  %s" %
+              (name, "%.4f" % p if p is not None else "n/a", thr, verdict))
+
+    # ---- 探索性：CUPED ----
+    print("\n===== CUPED（探索性，不进主结论）=====")
+    Z = [f[0] for _, f in rows]                  # 基线 final_loss 作协变量
+    zbar = st.mean(Z)
+    vz = st.pvariance(Z) if len(Z) > 1 else 0.0
+    for name, i, j in FAMILIES:
+        ds = [v[i] - v[j] for v, _ in rows]
+        theta = cov(ds, Z) / vz if vz > 0 else 0.0
+        adj = [q - theta * (z - zbar) for q, z in zip(ds, Z)]
+        m, t, df, p = paired_t(adj)
+        print("  %-30s theta=%+.4f  调整后 %+.4f  t=%+.3f  p=%s" %
+              (name, theta, m, t,
+               "%.4f" % p if p is not None else "n/a"))
+
+    print("\n===== 口径/成本（必须随结论一起报）=====")
+    for s in seeds:
+        for q in [t.format(s) for t in TRIPLES[0]]:
+            d = load(q)
+            print("  s%d %-22s params=%s→%s width=%s chunk=%s step=%.0fms  %.0fs" %
+                  (s, q.split("_")[-1], format(d["params_start"],","),
+                   format(d["params_end"],","), d.get("composed_width"),
+                   d.get("compose_chunk"), d.get("avg_step_ms",0),
+                   d.get("elapsed_sec",0)))
+    print("\n【预注册口径】")
+    print("  · 显著 = 至少一族 Holm PASS 且 3/3 以上同号")
+    print("  · 同时报 params_start / composed_width / eff / var_norm / elapsed")
+    print("  · 不写「加速」：到达步数需另行用 history 插值核验")
+    print("  · 参数量差异必须如实列；V10 若赢，需排除「容量」替代解释")
+    print("  · chunk=32 与 B 档 chunk=1 属口径差异，不得混报；换 chunk 需重跑 B 档")
+    print("  · grouped 当前是「cell 组 vs 主干组」独立裁剪，不是「隔离新增参数」；")
+    print("    v10 与 B 参数量已对齐，全局 clip 副作用本就不存在，故 grouped 仅列探索")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,96 @@
+{
+  "tag": "dummy_smoke",
+  "mode": "split",
+  "config": {
+    "data": "data_25mb.txt",
+    "d": 256,
+    "n": 384,
+    "L": 4,
+    "h": 128,
+    "n_cells": 4,
+    "n_head": 4,
+    "scaffold_top_k": 32,
+    "select_mode": "soft",
+    "rank": 4,
+    "temp": 5.0,
+    "variant": "shared",
+    "shared_mult": 4,
+    "clone_temp": 2.0,
+    "bs": 8,
+    "seq_len": 128,
+    "lr": 0.0003,
+    "max_steps": 20,
+    "seed": 0,
+    "mode": "split",
+    "split_k": 8,
+    "split_at": 10,
+    "groups": 8,
+    "join_mode": "share",
+    "tag": "dummy_smoke",
+    "outdir": "output/v4"
+  },
+  "vocab_size": 100,
+  "params_start": 17754989,
+  "params_end": 17984365,
+  "start_loss": 4.781765460968018,
+  "final_loss": 3.1447768211364746,
+  "val_loss": 3.1756373167037966,
+  "ppl": 23.94207369058752,
+  "eff_organs_last": 4.171989440917969,
+  "var_norm_last": 0.16945573687553406,
+  "elapsed_sec": 2.4265565872192383,
+  "events": [
+    {
+      "step": 10,
+      "event": "divide",
+      "K": 8,
+      "parents": [
+        60,
+        237,
+        202,
+        289,
+        4,
+        67,
+        320,
+        331
+      ]
+    },
+    {
+      "step": 10,
+      "event": "wire",
+      "child_w": [
+        0.01367,
+        0.01217,
+        0.01294,
+        0.01274,
+        0.01259,
+        0.01331,
+        0.01313,
+        0.0131
+      ]
+    }
+  ],
+  "history": [
+    {
+      "step": 0,
+      "loss": 4.781765460968018,
+      "lr": 0.0003,
+      "eff": 6.1089911460876465,
+      "var_norm": 0.14755061268806458
+    },
+    {
+      "step": 10,
+      "loss": 3.420865535736084,
+      "lr": 2.9999999999999997e-05,
+      "eff": 4.761305809020996,
+      "var_norm": 0.1561897248029709
+    },
+    {
+      "step": 19,
+      "loss": 3.1447768211364746,
+      "lr": 2.9999999999999997e-05,
+      "eff": 4.171989440917969,
+      "var_norm": 0.16945573687553406
+    }
+  ]
+}
