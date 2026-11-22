@@ -1,0 +1,508 @@
+# -*- coding: utf-8 -*-
+"""paperplane-Moe · 生物学思想 → 可执行代码（手写笔记规格 1~14 + 补遗 A~F）。
+
+设计总纲（来自本仓库已归档的实测教训，不是泛泛类比）
+----------------------------------------------------
+1. 【零扰动起步】所有原语默认增益 0、且用 buffer 而非 nn.Parameter，
+   不进 model.parameters()、不消耗全局 RNG、不改 optimizer/clip。
+   ⇒ 关闭时前向逐位恒等，可复现 b5_E1_split 的 301 点全 0 对照。
+2. 【拼专家红线】规格 12：一切挂在 Σ_i w_i·silu(x·E1_i)·E2_i 或其残差增量；
+   wiring 只分配份额、不筛选细胞；临时模组 Δw 用正锥 + 零和增量。
+3. 【不写加速】局部预条件（线粒体）只在同 FLOPs + 到达步数对照下才谈收敛，
+   吞吐提升必须单独叫「并行效率」（规格 7/14）。
+4. 【观测先行】规格 11/13 的字段在 TelemetryRecorder 里落实，默认也写。
+
+沙盒无 torch：本文件只做 ast.parse 静态验证；真训练在 DSW 跑 verify_bio.py。
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------- 配置
+@dataclass
+class BioConfig:
+    """全部默认 False / 0：关闭时是纯观测层，前向逐位恒等。"""
+    enable: bool = False              # 总开关
+    receptor: bool = False            # 规格 1：受体
+    blood: bool = False               # 规格 1/3/C：血液 + 两类忆点
+    active_transport: bool = False    # 补遗 C：主动运输（否则只被动扩散）
+    temp_expert: bool = False         # 规格 6/13：临时专家模组
+    skeleton: bool = False            # 规格 9：小核架
+    sparse_recall: bool = False       # 规格 10：稀疏回顾
+    autophagy: bool = False           # 规格 1/A：自噬
+    apoptosis: bool = False           # 规格 1/A：主动死亡
+    atp: bool = False                 # 补遗 D / 规格 14：ATP 预算
+    enzyme: bool = False              # 补遗 E：活化酶
+    gradient_guard: bool = False      # 补遗 B：局部梯度防护
+    mitochondria: bool = False        # 规格 14：局部预条件器
+    chloroplast: bool = False         # 规格 14：编码前端
+    clone_in_eval: bool = False       # 规格 7：推理期只读副本
+
+    k: int = 16                       # 拼专家计算稀疏度
+    h_cell: int = 3                  # 每个专家隐宽
+    top_m: int = 4                   # 稀疏回顾取 top-m
+    skeleton_rank: int = 4           # 小核架秩（远小于 d）
+    temp_module_ttl: int = 0         # 0 → 同 step 创建并解散
+    budget_init: float = 0.0         # 0 → 不消耗，不改任何计算
+    gate: float = 0.0                # ★ 所有调制器的统一增益：0 = 严格恒等
+    eps: float = 1e-6
+
+    def as_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items()}
+
+
+# ---------------------------------------------------------------- 规格 3 · 两类忆点
+@dataclass
+class MemoryPoint:
+    """忆点：kind ∈ {'info','task'}。info=训练吸收，task=问答/处理时携带。"""
+    mid: str
+    kind: str                        # 'info' | 'task'
+    vec: torch.Tensor                # [d]，buffer，不参与梯度
+    created_at: int = 0
+    erased: bool = False
+    task_id: str = ""
+
+    def __post_init__(self):
+        assert self.kind in ("info", "task"), self.kind
+        assert self.vec.dim() == 1, "忆点必须是 [d] 向量"
+
+
+class Bloodstream(nn.Module):
+    """规格 1/3/C：血液 = 全局信息载体，自上而下、中层汇聚。
+
+    被动扩散：随 blood 从上层流到下层，增益 gate=0 ⇒ 严格恒等。
+    主动运输：由 task 忆点定向投递到指定细胞（补遗 C），同样默认恒等。
+    「最中间流」→ 中层汇聚：只在 L//2 层把 info/task 忆点做一次汇总注入。
+    """
+
+    def __init__(self, d: int, n_layers: int, cfg: BioConfig, seed: int = 0):
+        super().__init__()
+        self.d, self.L, self.cfg = d, n_layers, cfg
+        self.mid = n_layers // 2
+        g = torch.Generator().manual_seed(seed * 7919 + 101)  # 局部 RNG，不碰全局
+        self.register_buffer("flow", torch.zeros(n_layers, d))
+        self.register_buffer("gate_buf", torch.zeros(1))
+        self.info_points: List[MemoryPoint] = []
+        self.task_points: List[MemoryPoint] = []
+        self._counter = 0
+
+    def add(self, kind: str, vec: torch.Tensor, step: int, task_id: str = "") -> MemoryPoint:
+        self._counter += 1
+        p = MemoryPoint(
+            mid="%s-%04d" % (kind, self._counter), kind=kind,
+            vec=vec.detach().float().clone(), created_at=step, task_id=task_id)
+        (self.info_points if kind == "info" else self.task_points).append(p)
+        return p
+
+    def erase(self, kind: str, mid: str) -> bool:
+        """规格 3/8：擦除 info 不影响 task（语义级证明的入口）。"""
+        pts = self.info_points if kind == "info" else self.task_points
+        for p in pts:
+            if p.mid == mid:
+                p.erased = True
+                p.vec = torch.zeros_like(p.vec)
+                return True
+        return False
+
+    def points(self, kind: Optional[str] = None) -> List[MemoryPoint]:
+        pts = (self.info_points + self.task_points) if kind is None else (
+            self.info_points if kind == "info" else self.task_points)
+        return [p for p in pts if not p.erased]
+
+    def flow_step(self, layer_idx: int, x: torch.Tensor,
+                  step: int) -> Tuple[torch.Tensor, dict]:
+        """返回 (调制后的 x, 观测字段)。gate=0 ⇒ out 与 x 逐位相等。"""
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        obs = {"layer": layer_idx, "mem_info": len(self.points("info")),
+               "mem_task": len(self.points("task")),
+               "transport": "active" if (self.cfg.enable and self.cfg.active_transport)
+                            else "passive",
+               "gain": gain, "mid_hub": (layer_idx == self.mid)}
+        if gain == 0.0 or not self.cfg.enable or not self.cfg.blood:
+            return x, obs
+        # 被动扩散：血液状态按层 EMA 累积，再以 gain 注入（非线性由拼专家层负责）
+        with torch.no_grad():
+            self.flow[layer_idx].mul_(0.99).add_(
+                x.detach().reshape(-1, self.d).float().mean(0) * 0.01)
+        if layer_idx != self.mid:
+            return x, obs
+        pts = self.points()
+        if not pts:
+            return x, obs
+        bank = torch.stack([p.vec for p in pts]).to(x.device, x.dtype)
+        inject = bank.mean(0).view(1, 1, self.d)
+        return x + gain * inject, obs
+
+
+# ---------------------------------------------------------------- 规格 1 · 受体
+class Receptor(nn.Module):
+    """输入侧接入判定：接收后「标记」并决定辅助 / 继续处理。
+
+    不改 wiring（红线）。标记是观测张量；辅助注入默认 0 ⇒ 严格恒等。
+    """
+
+    def __init__(self, d: int, cfg: BioConfig):
+        super().__init__()
+        self.d, self.cfg = d, cfg
+        self.register_buffer("gate_buf", torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        with torch.no_grad():
+            # 标记：按 token 范数是否超过均值（纯观测，不筛选、不丢 token）
+            n = x.detach().float().norm(dim=-1)
+            mark = (n > n.mean()).detach()
+        obs = {"marked": int(mark.sum().item()),
+               "total": int(mark.numel()),
+               "decision": "assist" if (self.cfg.enable and self.cfg.receptor
+                                         and gain > 0) else "continue",
+               "gain": gain}
+        if gain == 0.0:
+            return x, obs
+        # 辅助处理：对「被标记」的 token 施加一个零均值、增益极小的定向扰动
+        h = x.detach().float()
+        h = h - h.mean(dim=-1, keepdim=True)
+        return x + gain * h.to(x.dtype) * mark.to(x.dtype).unsqueeze(-1), obs
+
+
+# ---------------------------------------------------------------- 规格 9 · 小核架
+class Nucleoskeleton(nn.Module):
+    """任务级轻量状态骨架：低秩 buffer，随 task 忆点携带，不进主干参数。"""
+
+    def __init__(self, d: int, cfg: BioConfig, n_tasks: int = 16):
+        super().__init__()
+        self.d, self.r, self.cfg = d, cfg.skeleton_rank, cfg
+        assert cfg.skeleton_rank < d, "小核架必须远小于 d"
+        self.register_buffer("frame", torch.zeros(n_tasks, cfg.skeleton_rank, d))
+        self.register_buffer("gate_buf", torch.zeros(1))
+
+    def params_count(self) -> int:
+        return 0                                    # 全 buffer，参数量 0（<主干 1%）
+
+    def carry(self, task_id: str, task_vec: torch.Tensor) -> torch.Tensor:
+        """返回 [r,d] 骨架：默认全零（优雅降级：移除后任务忆点仍可用）。"""
+        if not (self.cfg.enable and self.cfg.skeleton):
+            return torch.zeros(self.r, self.d, device=task_vec.device,
+                               dtype=task_vec.dtype)
+        with torch.no_grad():
+            idx = sum(ord(c) for c in task_id) % self.frame.shape[0]
+            self.frame[idx].add_(task_vec.detach().float().view(1, self.d)
+                                 * 0.01 * self.cfg.gate)
+        return self.frame[idx].to(task_vec.dtype)
+
+
+# ---------------------------------------------------------------- 规格 10 · 稀疏回顾
+class SparseRecall(nn.Module):
+    """从 info 忆点按 cos 相似度取 top-m 片段注入；超长上下文靠忆点携带而非加长 seq_len。"""
+
+    def __init__(self, d: int, cfg: BioConfig):
+        super().__init__()
+        self.d, self.cfg = d, cfg
+        self.register_buffer("gate_buf", torch.zeros(1))
+
+    def recall(self, x: torch.Tensor, blood: Bloodstream) -> Tuple[torch.Tensor, dict]:
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        pts = blood.points("info")
+        obs = {"hit": 0, "pool": len(pts), "top_m": self.cfg.top_m, "gain": gain}
+        if not pts or gain == 0.0 or not (self.cfg.enable and self.cfg.sparse_recall):
+            return torch.zeros_like(x), obs
+        bank = torch.stack([p.vec for p in pts]).to(x.device, x.dtype)  # [P,d]
+        q = x.detach().float().reshape(-1, self.d).mean(0)               # [d]
+        sim = F.cosine_similarity(q.unsqueeze(0), bank.float(), dim=-1)  # [P]
+        m = min(self.cfg.top_m, sim.numel())
+        idx = torch.topk(sim, m).indices
+        hit = bank.index_select(0, idx).mean(0).view(1, 1, self.d)
+        obs["hit"] = int(m)
+        return gain * hit.to(x.dtype), obs
+
+
+# ---------------------------------------------------------------- 规格 6/13 · 临时专家模组
+class TempExpertModule(nn.Module):
+    """一次任务内，由受体标记的若干细胞动态拼成 Σ w_i·silu(xE1_i)E2_i。
+
+    Δw = gate · 正锥零和增量：全 w 保持 >0、和为 0（不筛选、不改归一化）。
+    任务结束 dissolve() 把 Δw 清零，稳态 wiring 逐位不变；dissolved_at 必填。
+    """
+
+    def __init__(self, n: int, d: int, cfg: BioConfig):
+        super().__init__()
+        self.n, self.d, self.cfg = n, d, cfg
+        self.register_buffer("delta_w", torch.zeros(n))
+        self.register_buffer("gate_buf", torch.zeros(1))
+        self.module_id: Optional[str] = None
+        self.created_at: Optional[int] = None
+        self.dissolved_at: Optional[int] = None
+
+    def open(self, step: int, task_id: str, wiring: torch.Tensor,
+             cells: List[int], mem_refs: List[str]) -> dict:
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        # ★ 长度随 wiring 自适应：分裂后 wiring 会 cat 上 K 个正锥份额（n→n+K）
+        n_w = int(wiring.shape[-1])
+        self.n = n_w
+        w = wiring.detach().float().mean(0)[:n_w]                     # [n_w] 全 >0
+        # 正锥：softmax+eps 严格 >0；减去均值得到零和增量（不破坏 Σw=1）
+        s = F.softmax(w, dim=-1) + self.cfg.eps
+        dw = (s - s.mean()) / s.sum().clamp_min(self.cfg.eps)
+        self.delta_w = (gain * dw).detach()
+        self.module_id = "tm-%s-%d" % (task_id, step)
+        self.created_at = int(step)
+        self.dissolved_at = None
+        return {
+            "step": step, "task_id": task_id, "module_id": self.module_id,
+            "kind": "temp_expert", "cells": list(cells),
+            "w": [round(v, 6) for v in self.delta_w.tolist()[:8]],
+            "w_sum": round(float(self.delta_w.sum()), 8),
+            "w_min": round(float(self.delta_w.min()), 8),
+            "mem_refs": list(mem_refs), "call_chain": list(cells),
+            "created_at": self.created_at, "dissolved_at": None,
+            "val_delta": 0.0, "budget": 0,
+        }
+
+    def dissolve(self, step: int, val_delta: float = 0.0) -> dict:
+        assert self.module_id is not None, "open() 之后才能 dissolve()"
+        before = float(self.delta_w.abs().sum())
+        self.delta_w = torch.zeros_like(self.delta_w)
+        self.dissolved_at = int(step)
+        ev = {"step": step, "module_id": self.module_id,
+              "kind": "temp_expert_dissolve", "dissolved_at": self.dissolved_at,
+              "created_at": self.created_at, "delta_w_cleared": before,
+              "val_delta": float(val_delta), "wiring_restored": True}
+        self.module_id, self.created_at = None, None
+        return ev
+
+    @property
+    def active(self) -> bool:
+        return self.module_id is not None
+
+
+# ---------------------------------------------------------------- 规格 14 / 补遗 D · ATP
+class ATPBudget:
+    """计算预算 token：门控激活、复制细胞、临时模组都消耗预算（只记账，不改梯度）。"""
+
+    def __init__(self, cfg: BioConfig):
+        self.cfg = cfg
+        self.balance = float(cfg.budget_init)
+        self.spent = 0.0
+
+    def spend(self, amount: float, reason: str, step: int) -> dict:
+        if not (self.cfg.enable and self.cfg.atp):
+            return {"step": step, "kind": "budget", "spent": 0.0,
+                    "balance": self.balance, "reason": reason, "enabled": False}
+        a = min(max(0.0, float(amount)), self.balance)
+        self.balance -= a
+        self.spent += a
+        return {"step": step, "kind": "budget", "spent": a,
+                "balance": self.balance, "reason": reason, "enabled": True}
+
+
+# ---------------------------------------------------------------- 补遗 E · 活化酶
+class Enzyme(nn.Module):
+    """optimizer / 归一化层类比：降低「反应活化能」。gain=0 ⇒ 严格恒等。"""
+
+    def __init__(self, d: int, cfg: BioConfig):
+        super().__init__()
+        self.d, self.cfg = d, cfg
+        self.register_buffer("gate_buf", torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        if gain == 0.0 or not (self.cfg.enable and self.cfg.enzyme):
+            return x
+        xf = x.float()
+        return (x + gain * (xf - xf.mean(-1, keepdim=True))
+                / (xf.std(-1, keepdim=True) + 1e-5)).to(x.dtype)
+
+
+# ---------------------------------------------------------------- 补遗 B · 局部梯度防护
+class GradientGuard:
+    """「人体梯度多到爆炸却不炸」→ 逐参数局部归一化，而非全局 clip。
+
+    全局 clip_grad_norm_ 的三 seed 副作用已被证伪为有害（S8/step23），
+    所以这里【默认不注册】，且即使启用也只对指定参数逐张量缩放，不产生总范数耦合。
+    """
+
+    def __init__(self, cfg: BioConfig, max_norm: float = 1.0):
+        self.cfg, self.max_norm = cfg, max_norm
+        self._hooks = []
+
+    def attach(self, params) -> int:
+        if not (self.cfg.enable and self.cfg.gradient_guard):
+            return 0
+        for p in params:
+            if not p.requires_grad:
+                continue
+            def _hook(grad, _mx=self.max_norm):
+                n = grad.norm()
+                return grad if n <= _mx else grad * (_mx / (n + 1e-6))
+            self._hooks.append(p.register_hook(_hook))
+        return len(self._hooks)
+
+    def detach(self) -> None:
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+
+
+# ---------------------------------------------------------------- 规格 14 · 线粒体 / 叶绿体
+class Mitochondria:
+    """局部预条件器（供能单元）：二阶矩 EMA 的逐参数自适应尺度。
+
+    ⚠ 规格 14 预测 1：只有「到达同一 loss 步数变短 + 终态等价」才叫加速；
+    只涨吞吐叫并行效率。本类默认关闭，且【不改前向函数】。
+    """
+
+    def __init__(self, cfg: BioConfig, beta: float = 0.95):
+        self.cfg, self.beta = cfg, beta
+        self.v: Dict[int, torch.Tensor] = {}
+
+    def precondition(self, params) -> int:
+        if not (self.cfg.enable and self.cfg.mitochondria):
+            return 0
+        with torch.no_grad():
+            for p in params:
+                if p.grad is None:
+                    continue
+                key = id(p)
+                g2 = p.grad.detach().float().pow(2).mean()
+                v = self.v.get(key, g2.clone())
+                v.mul_(self.beta).add_(g2 * (1 - self.beta))
+                self.v[key] = v
+                p.grad.mul_(1.0 / (v.sqrt() + 1e-8).to(p.grad.dtype))
+        return len(self.v)
+
+
+class Chloroplast(nn.Module):
+    """外部数据 → 内部可用能量的编码前端；gain=0 ⇒ 严格恒等，不动 wiring。"""
+
+    def __init__(self, d: int, cfg: BioConfig, seed: int = 0):
+        super().__init__()
+        g = torch.Generator().manual_seed(seed * 104729 + 7)
+        self.register_buffer("proj", torch.randn(d, d, generator=g) / math.sqrt(d))
+        self.register_buffer("gate_buf", torch.zeros(1))
+        self.cfg = cfg
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gain = float(self.gate_buf.item()) + (self.cfg.gate if self.cfg.enable else 0.0)
+        if gain == 0.0 or not (self.cfg.enable and self.cfg.chloroplast):
+            return x
+        return x + gain * (x.float() @ self.proj.to(x.dtype)).to(x.dtype)
+
+
+# ---------------------------------------------------------------- 规格 1/A · 自噬与主动死亡
+class Autophagy:
+    """容量/信息不足 → 回收低价值细胞份额（规格 A 假说，可证伪）。
+
+    触发：fitness 低 + 份额低 + 梯度饥饿三者联合。
+    只产出【建议】的正锥重分配与事件，绝不直接改 wiring（红线）。
+    """
+
+    def __init__(self, cfg: BioConfig):
+        self.cfg = cfg
+
+    @staticmethod
+    def should_trigger(fitness: float, share: float, grad_starve: bool,
+                       thr: float = 0.2) -> bool:
+        return bool(fitness < thr and share < thr and grad_starve)
+
+    def propose(self, step: int, cell_id: int, share: float,
+                fitness: float, grad_starve: bool) -> Optional[dict]:
+        if not (self.cfg.enable and self.cfg.autophagy):
+            return None
+        if not self.should_trigger(fitness, share, grad_starve):
+            return None
+        # 正锥重分配：把被回收份额均匀加回所有细胞，全权重仍 >0
+        return {"step": step, "event": "autophagy", "kind": "recycle",
+                "cell_id": cell_id, "share_before": round(float(share), 6),
+                "fitness": round(float(fitness), 6),
+                "reason": "low_fitness+low_share+grad_starve",
+                "redistribute": "positive_cone_uniform",
+                "budget_before": None, "budget_after": None}
+
+
+class Apoptosis:
+    """阈值后彻底移除：为保形状不真删张量，而是标记 inactive + 冻结状态。"""
+
+    def __init__(self, cfg: BioConfig, thr: float = 0.05):
+        self.cfg, self.thr = cfg, thr
+
+    def propose(self, step: int, cell_id: int, share: float,
+                lifespan: int, min_lifespan: int = 500) -> Optional[dict]:
+        if not (self.cfg.enable and self.cfg.apoptosis):
+            return None
+        if share >= self.thr or lifespan < min_lifespan:
+            return None
+        return {"step": step, "event": "apoptosis", "kind": "remove",
+                "cell_id": cell_id, "share": round(float(share), 6),
+                "lifespan": lifespan, "reason": "share<thr after min_lifespan",
+                "container_kept": True}
+
+
+# ---------------------------------------------------------------- 规格 5/11/13 · 谱系
+class CellLineage:
+    """从 events 重放完整细胞谱系；任意 json 都能重放（规格 5 验收）。"""
+
+    def __init__(self):
+        self.birth: Dict[int, int] = {}
+        self.parent: Dict[int, int] = {}
+        self.death: Dict[int, int] = {}
+        self.calls: Dict[int, int] = {}
+
+    def feed(self, ev: dict) -> None:
+        k = ev.get("event", ev.get("kind", ""))
+        if k == "divide":
+            for j, p in enumerate(ev.get("parents", [])):
+                cid = ev.get("child_ids", [None] * 999)[j] if ev.get("child_ids") else None
+                if cid is None:
+                    cid = ev.get("n0", 0) + j
+                self.birth[int(cid)] = int(ev.get("step", 0))
+                self.parent[int(cid)] = int(p)
+        elif k in ("autophagy", "apoptosis"):
+            self.death[int(ev.get("cell_id", -1))] = int(ev.get("step", 0))
+        elif k == "cell_call":
+            for cid in ev.get("cells", []):
+                self.calls[int(cid)] = self.calls.get(int(cid), 0) + 1
+
+    @classmethod
+    def replay(cls, events: List[dict]) -> "CellLineage":
+        lin = cls()
+        for ev in events:
+            lin.feed(ev)
+        return lin
+
+    def summary(self) -> dict:
+        return {"born": len(self.birth), "dead": len(self.death),
+                "alive": len(set(self.birth) - set(self.death)),
+                "called_cells": len(self.calls),
+                "total_calls": sum(self.calls.values())}
+
+
+# ---------------------------------------------------------------- 规格 12 · 红线守护
+def assert_compose_redline(wiring: torch.Tensor, composed_width: float,
+                           k: int, h_cell: int, gate: float,
+                           out: torch.Tensor, ref: torch.Tensor,
+                           tol: float = 1e-6) -> dict:
+    """三条硬约束的可执行检查（verify_bio.py 会调用）。
+
+    tol 默认 1e-6：fp32 下 0*finite 可能留 ±0.0，用容差判「逐位一致」而非
+    torch.equal 的位级比较；想做严格位级检查传 tol=0。
+    """
+    w = wiring.detach().float()
+    checks = {
+        "no_selection": bool((w > 0).all()),                    # 全 n 非零，不筛选
+        "width_linear": bool(composed_width == float(k * h_cell)),
+        "sum_w": round(float(w.sum(-1).mean()), 6),
+        "gate_zero_is_identity": bool(gate == 0.0) and bool(
+            (out - ref).abs().max().item() <= tol),
+        "max_abs_delta": float((out - ref).abs().max().item()),
+    }
+    assert checks["no_selection"], "wiring 出现 0 权重 → 退化成选专家，踩红线"
+    assert checks["width_linear"], "拼后宽度不随 k 线性增长"
+    assert checks["gate_zero_is_identity"], "gate=0 时未严格恒等（零扰动红线破了）"
+    return checks

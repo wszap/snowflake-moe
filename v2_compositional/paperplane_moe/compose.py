@@ -1,0 +1,277 @@
+# -*- coding: utf-8 -*-
+"""paperplane-Moe · V1.001 核心：残差版真拼 cell（修 step25 的 +0.1099）。
+
+为什么是残差增量，而不是再替换一次前向
+----------------------------------------
+step25 把 B 主干整个换成 v10 起步函数类，单 seed 终态
+    V10(global) − B = +0.1099,  grouped − global = +0.0059
+中途 d_loss 平台 +0.1201±0.0035 在 step 500（分裂前 1000 步）就形成，
+warm-start 子专家继承只带来 −0.0003。⇒ 换起步函数类会输，且与
+clip / 容量 / 分裂 / 入口全部无关（301 点全 0 对照已排除）。
+
+V1.001 改为（规格 12 的「或其残差增量」）：
+    out = [B 主干原前向，逐位不变] + gate · Σ_i w_i·silu(x·E1_i)·E2_i
+    gate = 0 起步 ⇒ 严格等于 B 档 ⇒ 不会出现 +0.12 平台
+    gate 学起来后 ⇒ 才拿到宽度 k×h_cell 线性增长的真拼容量
+
+参数量对齐（默认 mode="fixed"）
+----------------------------------------
+    E1/E2 是【固定随机 buffer】（局部 generator，不消耗全局 RNG），
+    唯一可学参数是 gate_comp（1 个/cell）。
+    L=4 × n_cells=4 ⇒ 全模型 +16，相对 17,225,573 是 +0.00009%，
+    赢归不到容量。mode="learned" 会显著增加参数，必须单独标注并不进主 A/B。
+
+红线
+----------------------------------------
+    wiring 复用 B 的全 n 内生份额（全权重恒非零、不筛选）；
+    top-k 只是【计算稀疏】；诊断 eff / var_norm 仍用全 n wiring。
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+from typing import List, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# snowflake_B.py 位于仓库的 v2_compositional/；从包内导入时补一次路径
+try:
+    from snowflake_B import SnowflakeB
+except ImportError:                                    # pragma: no cover
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _V2 = os.path.join(_ROOT, "v2_compositional")
+    if _V2 not in sys.path:
+        sys.path.insert(0, _V2)
+    from snowflake_B import SnowflakeB
+
+
+def compose_width(k: int, h_cell: int) -> int:
+    """拼后等效隐层宽度 = k × h_cell，随 k 线性增长（v8 恒等式）。"""
+    return int(k) * int(h_cell)
+
+
+def param_overhead(n_cells: int = 16, mode: str = "fixed",
+                   n: int = 384, d: int = 256, h_cell: int = 3) -> int:
+    """相对 B 档的参数量差额（可证伪、写进验收日志）。"""
+    if mode == "fixed":
+        return int(n_cells)                            # 每个 cell 一个 gate_comp
+    if mode == "learned":
+        return int(n_cells) * (2 * n * d * h_cell + 1)
+    raise ValueError("mode 只能是 fixed / learned")
+
+
+class ResidualComposeCell(SnowflakeB):
+    """drop-in 替代 SnowflakeB：forward(x, perm, force_mix) -> (out, info)。
+
+    前向逐行复制 B 档，只在 self.head(...) 之前插入残差增量；
+    gate_comp=0 时输出与 B 档逐位一致（verify_bio.py 的零扰动自检）。
+    """
+
+    def __init__(self, *args, k: int = 16, h_cell: int = 3,
+                 mode: str = "fixed", renorm_comp: bool = True,
+                 bio_cfg=None, seed: int = 0, **kw):
+        kw.setdefault("seed", seed)   # 透传给 SnowflakeB，保证跨 seed 配对同初始化
+        super().__init__(*args, **kw)
+        assert mode in ("fixed", "learned"), mode
+        self.k = min(int(k), self.n)
+        self.h_cell = int(h_cell)
+        self.mode = mode
+        self.renorm_comp = bool(renorm_comp)
+        self.bio_cfg = bio_cfg
+
+        # ★ 局部 generator：绝不消耗全局 RNG，否则 B 档数据顺序会被改
+        g = torch.Generator().manual_seed(int(seed) * 7919 + 31337)
+        e1 = torch.randn(self.n, self.d, self.h_cell, generator=g) / math.sqrt(self.d)
+        e2 = torch.randn(self.n, self.h_cell, self.d, generator=g) / math.sqrt(self.h_cell)
+        if mode == "fixed":
+            self.register_buffer("E1", e1)
+            self.register_buffer("E2", e2)
+        else:
+            self.E1 = nn.Parameter(e1)
+            self.E2 = nn.Parameter(e2)
+        self.gate_comp = nn.Parameter(torch.zeros(1))    # 0 起步 → 严格恒等
+        # V1.003 酶学：每 expert slot 一个区室酶池；None ⇒ 逐位恒等、零开销
+        self.enzymology = None
+        self.enzyme_factors = None
+        self._substrate_obs = None
+        # ---- V1.004：该 cell 的局部二阶曲率代理 H = mean(comp^2)。
+        # 只做 detach 统计，不改前向数值、不碰 RNG ⇒ gate=0 零污染不破。
+        self._last_comp_norm2 = 0.0
+        self._last_comp_numel = 1
+
+    # ------------------------------------------------------------ 拼增量
+    def _compose_delta(self, xc: torch.Tensor, wiring: torch.Tensor,
+                       ref: torch.Tensor) -> torch.Tensor:
+        """Σ_i topw_i · silu(x·E1_i)·E2_i，逐 slot 低显存路径（与 v8 一致）。"""
+        topw, topi = torch.topk(wiring, self.k, dim=-1)        # [C,k]
+        if self.renorm_comp:
+            topw = topw / topw.sum(-1, keepdim=True).clamp_min(1e-9)
+        comp = torch.zeros_like(ref)                            # [C,P,d]
+        n_e1 = self.E1.shape[0]
+        enz = getattr(self, "enzymology", None)
+        fac = getattr(self, "enzyme_factors", None)
+        obs = [] if enz is not None else None
+        for i in range(self.k):
+            idx = topi[:, i].clamp(max=n_e1 - 1)
+            E1i = self.E1.index_select(0, idx)                  # [C,d,h_cell]
+            E2i = self.E2.index_select(0, idx)                  # [C,h_cell,d]
+            hh = F.silu(torch.bmm(xc, E1i))                     # [C,P,h_cell]
+            # ★ V1.003：酶降低活化能 = 只放大该专家内部反应 comp_i，
+            #   不改 Keq、不改 topw/wiring（红线 12：不筛选、全权重非零）。
+            #   c_i 是 Python float 标量乘，autograd 链路不断。
+            ci = 1.0
+            if enz is not None:
+                # 叶绿体输入 = 该 slot 真实前向统计量（只读 detach）
+                obs.append(float(hh.detach().float().pow(2).mean().item()))
+                ci = float(fac[i]) if (fac is not None and i < len(fac)) else 1.0
+            term = torch.bmm(hh, E2i)
+            if ci != 1.0:
+                term = term * ci
+            comp = comp + topw[:, i][:, None, None] * term
+        if enz is not None:
+            self._substrate_obs = obs
+        return comp
+
+    # ------------------------------------------------------------ 前向
+    def forward(self, x, perm=None, force_mix=None):
+        """与 SnowflakeB.forward 逐行一致；只多一行残差增量 + 两个诊断字段。"""
+        N, d = x.shape
+        c, cm = self.connect()
+        if getattr(self, "_split_c", None) is not None:
+            c = self._split_c
+            self.heal_term = None
+        key = self.organelle_memory + c.T @ self.organelle_memory
+        if getattr(self, "_split_n0", 0) > 0:
+            key = key[:self._split_n0]
+
+        xc = self._chunk_view(x)
+        C, P, _ = xc.shape
+        xsum = xc.mean(1)
+        wiring = F.softmax(xsum @ key.T / math.sqrt(self.d) * self.temp, dim=-1)
+        if getattr(self, "soft_groups", None) is not None:
+            wiring, _wg = self.soft_groups.compose_prior(
+                wiring, xsum, self.organelle_memory, beta=0.1)
+            self._group_ent = float(
+                -(_wg * (_wg + 1e-9).log()).sum(-1).mean().detach()
+                / math.log(self.soft_groups.G))
+        if getattr(self, "wiring_mode", "soft") == "argmax":
+            wiring = F.one_hot(wiring.argmax(-1), self.n).to(wiring.dtype)
+        if self.min_eff_organs > 0:
+            wiring = self.enforce_min_effective(wiring, self.min_eff_organs)
+        if force_mix is not None:
+            fm = force_mix.unsqueeze(0) if force_mix.dim() == 1 else force_mix
+            wiring = fm.to(wiring.dtype).expand(C, -1)
+        elif perm is not None:
+            wiring = wiring[perm]
+        if getattr(self, "_split_child_w", None) is not None:
+            cw = self._split_child_w.to(wiring.dtype).unsqueeze(0).expand(C, -1)
+            wiring = torch.cat([wiring, cw], -1)
+
+        # ---- 规格 6/13：临时专家模组的正锥零和 Δw 接入前向 ----
+        # 由 train_bio.py 在每个任务开始/结束时写入 cell.temp_delta_w；
+        # ★ 全零时【整段跳过】，不做 clamp/renorm，保证 B 档逐位一致。
+        dw = getattr(self, "temp_delta_w", None)
+        dw_active = (dw is not None and dw.numel() == wiring.shape[-1]
+                     and float(dw.detach().abs().sum()) > 0.0)
+        if dw_active:
+            wiring = (wiring + dw.to(wiring.dtype).unsqueeze(0)).clamp_min(1e-9)
+            wiring = wiring / wiring.sum(-1, keepdim=True)
+
+        # ---- B 型主干（逐行复制，不改任何一行）----
+        U1 = torch.matmul(wiring, self.W1_U.view(self.n, -1)).view(-1, self.d, self.rank)
+        xA = torch.bmm(xc, U1)
+        hh = (torch.matmul(xc, self.W1_base) + torch.matmul(xA, self.W1_V))
+        hh = F.silu(hh)
+        U2 = torch.matmul(wiring, self.W2_U.view(self.n, -1)).view(-1, self.h, self.rank)
+        hA = torch.bmm(hh, U2)
+        out = (torch.matmul(hh, self.W2_base) + torch.matmul(hA, self.W2_V))
+
+        # ---- ★ V1.001 残差增量：真拼，gate=0 → 严格恒等 ----
+        comp = self._compose_delta(xc, wiring, out)
+        # ---- V1.004：记录 H 代理，供 EnzymeRateController 算「剩余未转化底物」
+        # S = (g/H)^2；这三行全是 detach 统计，不进计算图、不改任何输出。
+        self._last_comp_norm2 = float(comp.detach().float().pow(2).sum())
+        self._last_comp_numel = int(comp.numel())
+        out = out + self.gate_comp * comp
+
+        wd = wiring.detach()
+        self._last_mix = wd
+        with torch.no_grad():
+            self.mix_ema.mul_(0.99).add_(wd.mean(0).to(self.mix_ema.dtype) * 0.01)
+            self.fitness_ema.mul_(0.99).add_(wd.mean(0).to(self.fitness_ema.dtype) * 0.01)
+        sharp = wd.max(-1).values.mean().detach()
+        eff_n = 1.0 / (wd * wd).sum(-1).mean().detach()
+        _mean = 1.0 / self.n
+        var_max = (1.0 / self.n) * (1 - _mean) ** 2 + \
+                  ((self.n - 1) / self.n) * _mean ** 2
+        wvar = wd.var(0).mean().detach()
+        self._diag = {**cm,
+                      "wiring_ent": -(wd * (wd + 1e-9).log()).sum(-1).mean().detach(),
+                      "wiring_variance": wvar,
+                      "wiring_var_norm": wvar / float(var_max),
+                      "eff_organs": eff_n,
+                      "mix_sharp": sharp}
+        if float(sharp) > self.sharp_warn:
+            self.sharp_warn_count += 1
+        extra = {"wiring": wd,
+                 "composed_width": float(compose_width(self.k, self.h_cell)),
+                 "gate_comp": float(self.gate_comp.detach().mean()),
+                 "comp_norm": float(comp.detach().norm()),
+                 "compose_mode": self.mode,
+                 "temp_module_active": bool(dw_active)}
+        return self.head(out.reshape(N, d)), {**self._diag, **extra}
+
+    # ------------------------------------------------------------ 分裂（规格 2/5）
+    @torch.no_grad()
+    def expand(self, K: int, parents: List[int], device,
+               child_w: float = 0.0017, eps: float = 0.3):
+        """新忆点的 E1/E2 继承父体 + 局部小扰动；buffer 不新增可学参数。
+
+        注意：B 主干的 W1_U/W2_U 由 train_split.do_split 负责扩，
+        本方法只管真拼增量那两组基，避免重复。
+        """
+        pidx = torch.as_tensor(parents, device=device, dtype=torch.long)
+        e1p = self.E1.index_select(0, pidx)
+        e2p = self.E2.index_select(0, pidx)
+        g = torch.Generator().manual_seed(0)
+        e1n = e1p + 0.1 * eps * torch.randn(e1p.shape, generator=g).to(
+            device=e1p.device, dtype=e1p.dtype)
+        e2n = e2p + 0.1 * eps * torch.randn(e2p.shape, generator=g).to(
+            device=e2p.device, dtype=e2p.dtype)
+        self.E1 = torch.cat([self.E1, e1n], 0)
+        self.E2 = torch.cat([self.E2, e2n], 0)
+        return self.E1.shape[0]
+
+    # ------------------------------------------------------------ 规格 7/8
+    def clone_readonly(self):
+        """推理期只读副本（规格 7）；训练期硬断言禁止。"""
+        assert not self.training, "规格 7：训练期禁止复制自身"
+        import copy
+        twin = copy.deepcopy(self).eval()
+        for p in twin.parameters():
+            p.requires_grad_(False)
+        return twin
+
+    @torch.no_grad()
+    def reset_state(self):
+        """规格 8：取走细胞核 → 信息消失，容器/形状/接口保留。"""
+        for name in ("organelle_memory", "W1_U", "W1_V", "W2_U", "W2_V",
+                     "W1_base", "W2_base"):
+            if hasattr(self, name):
+                getattr(self, name).zero_()
+        self.mix_ema.zero_()
+        self.fitness_ema.zero_()
+        self.gate_comp.zero_()
+
+    # ------------------------------------------------------------ 账
+    def stats(self):
+        s = super().stats()
+        s.update(composed_width=compose_width(self.k, self.h_cell),
+                 compose_mode=self.mode,
+                 gate_comp=float(self.gate_comp.detach().mean()),
+                 param_overhead=param_overhead(1, self.mode,
+                                               self.n, self.d, self.h_cell))
+        return s

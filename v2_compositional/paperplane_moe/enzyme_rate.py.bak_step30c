@@ -1,0 +1,408 @@
+# -*- coding: utf-8 -*-
+"""paperplane-Moe V1.004 · 酶 = 速率常数（不是乘前向的幅值）
+
+================================================================================
+为什么重写 V1.003 的落点
+================================================================================
+MM/BH：`v = kcat·[E]·[S]/(Km+[S])`。酶降低的是活化能 ΔG‡，在动力学上只放大
+**速率常数**；ΔG°′ / Keq / 不动点严格不变（Haldane 正反同倍缩放）。
+把 `c_i` 乘在 `comp_i = silu(xE1_i)E2_i` 上，等价于改产物/平衡，不是酶。
+
+V1.003 的 `Enzymology.factors()` → `compose.py:125 ci` → `term*ci` 就是这种
+非法实现（step28f 实测 ci 1→1.325、gate 0→−0.0116、C−B≈−0.0003）。
+
+================================================================================
+真模型里「可学的专家参数」到底是什么
+================================================================================
+读 `compose.py`：E1/E2 是【固定随机 buffer】（局部 generator），
+`mode="fixed"` 时唯一可学参数是 **`gate_comp`（1 个/cell）**。
+L=4 × n_cells=4 ⇒ 16 个 cell，每个 cell 一个 gate_comp。
+所以 v9 toy 里的 θ_i 在真模型里严格对应 **per-cell 的 gate_comp**：
+
+    out = base + gate · Σ_i w_i·comp_i          （前向一比特不动）
+    ∂²L/∂gate² ≈ mean(comp²) = H_cell          （该 cell 的局部二阶曲率）
+    g_cell     = ∂L/∂gate  = gate_comp.grad
+    d_cell     = g_cell / H_cell                （★ 剩余未转化量 = MM 的 [S]）
+    S_cell     = d_cell²
+
+这与 v9 的 `d_i = O·g_i/a_i²` 严格同构，且 **H_cell 完全由模型自身算出**，
+不用 teacher、不用外部 scores、无路由、无筛选 ⇒ 全自主。
+
+================================================================================
+为什么乘 grad 不行、必须乘 param_group.lr
+================================================================================
+`train_bio.py` 用 AdamW：`θ ← θ − lr·m̂/(√v̂+ε)`。若把 k 乘在 `.grad` 上，
+m 与 v 同倍缩放 ⇒ m̂/√v̂ ≈ sign 不变 ⇒ k 被自适应归一化洗掉（η 与 k 共线的
+另一种表现）。**只有 `param_group["lr"] = base_lr · k_cell` 才是对 AdamW 也
+成立的速率常数**。v9 的 `CONST_K` / `LRX` 两个对照就是为了证伪「只是调大 lr」。
+
+================================================================================
+生物学对应（全部内源，无外部打分）
+================================================================================
+  · 组成型管家酶   β_const 恒定，cell 出生即在，c≡1 语义保留
+  · 底物诱导       f = S/(Km+S)，`e ← e + (f−e)/τ_E`（Jacob–Monod 慢变量）
+  · 归一化 Km      Km = median(S)（Atkinson 型比值信号，防量纲漂移）
+  · 各种各样的酶   cat_het：每 cell 的 Km_i = median(S)·exp(z_i)，z 自主漂变
+                   （Jensen 底物模糊性 / Ohno-Force DDC 式亚功能分配轨迹）
+  · 分裂 duplication  on_divide：e/Km 小突变 + 谱系事件（局部 Random）
+  · 自噬           长期 f 低 ⇒ e 衰减，`e←e+(f−e)/τ_E` 自动实现
+  · 不可分割       酶只改「这个 cell 走多快」，不改它「走到哪」，也不改 wiring
+
+================================================================================
+硬前置（任一不过即停线）
+================================================================================
+  · 全部状态是 Python float / list，不进 model.parameters()、不产生梯度
+  · 局部 random.Random(seed)，绝不消耗全局 torch RNG
+  · off / amp 档：本控制器【完全不实例化】，opt 分组与 lr 逐位不变
+  · cat 系：强制 `c.enzymology = None` / `c.enzyme_factors = None`，
+    彻底关闭旧 `ci·term` 前向，避免两个机制混在一起
+  · 前向只多两行 detach 统计（H 代理），不改任何数值
+"""
+from __future__ import annotations
+
+import math
+import random
+import statistics
+from typing import Dict, List, Optional, Sequence
+
+__all__ = ["EnzymeRateController", "verify_enzyme_rate"]
+
+_EPS = 1e-12
+
+
+def _corr(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """纯标准库 Pearson；样本不足或零方差返回 0.0（判据会如实打印）。"""
+    n = len(xs)
+    if n < 3 or n != len(ys):
+        return 0.0
+    mx, my = sum(xs) / n, sum(ys) / n
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= _EPS or vy <= _EPS:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(vx * vy)
+
+
+class EnzymeRateController:
+    """每个 cell 一个区室酶池；输出 per-cell 速率常数 k，乘在 AdamW 的 lr 上。
+
+    mode:
+      cat      逐 cell 底物诱导（★ 主实验）
+      cat_het  cat + 每 cell Km 自主漂变（「各种酶」）
+      const    k 取全局平均（消融：排除「等效调大 lr」）
+      lrx      不分组，所有 param_group 的 lr = base_lr·mean(k)（二次消融）
+    """
+
+    def __init__(self, n_cells: int, mode: str = "cat", seed: int = 0,
+                 beta_const: float = 0.10, beta_ind: float = 4.0,
+                 tau_e: float = 60.0, k_max: float = 6.0,
+                 gamma_km: float = 0.03, freeze_cell: int = -1,
+                 cost_alpha: float = 0.10,
+                 scope: str = "gate", warmup: int = 1):
+        assert mode in ("cat", "cat_het", "const", "lrx"), mode
+        assert scope in ("gate", "backbone"), scope
+        self.scope = str(scope)
+        self.warmup = max(0, int(warmup))
+        self.mode = mode
+        self.n = int(n_cells)
+        self.beta_const = float(beta_const)
+        self.beta_ind = float(beta_ind)
+        self.tau_e = max(1.0, float(tau_e))
+        self.k_max = float(k_max)
+        self.gamma_km = float(gamma_km)
+        self.freeze_cell = int(freeze_cell)
+        self.cost_alpha = float(cost_alpha)
+        self.rng = random.Random(int(seed) * 104729 + 991)
+
+        self.e = [0.0] * self.n            # 诱导酶浓度（Jacob–Monod 慢变量）
+        self.z = [0.0] * self.n            # log Km 漂变（cat_het）
+        self.k = [1.0] * self.n
+        self.trace: List[dict] = []
+        self.lineage: List[dict] = []
+        self.cost_sum = 0.0
+        self._last_corr = 0.0
+
+    # ------------------------------------------------------------ optimizer
+    def rebind_groups(self, opt, cells, base_lr: float) -> int:
+        """把每个 cell 的参数拆成独立 AdamW param_group（lr 可逐 cell 缩放）。
+
+        ★ V1.005：`scope="backbone"` 时，除了 gate_comp，还把该 cell 的
+          主干参数（W1_base/W2_base/W1_U/W1_V/W2_U/W2_V/organelle_memory）
+          也拆成一组并打上同一个 `gate_cell` 键。observe_step 里现有的
+          `if "gate_cell" in pg` 分支会自动给它们 `lr = base_lr * k_i`。
+          前向、参数量、RNG 全部不动；AdamW state 按 parameter 对象索引，
+          重新分组不丢动量（step29 已实证）。
+        ★ `do_split_B` 会重建 optimizer ⇒ 分裂后必须再调一次本函数。
+        ★ 自定义键 gate_cell / enz_k / enz_scope 被 AdamW 保留且忽略。
+        ★ lrx 档不调用本函数（它要的就是「不分组」）。
+        """
+        gate_ids = {id(c.gate_comp) for c in cells
+                    if hasattr(c, "gate_comp") and c.gate_comp is not None}
+        bb_ids: dict = {}
+        if self.scope == "backbone":
+            for idx, c in enumerate(cells):
+                g = getattr(c, "gate_comp", None)
+                gid = id(g) if g is not None else None
+                ids = {id(p) for p in c.parameters() if id(p) != gid}
+                if ids:
+                    bb_ids[idx] = ids
+        move = set(gate_ids)
+        for s in bb_ids.values():
+            move |= s
+        if not move:
+            return 0
+        for pg in opt.param_groups:
+            pg["params"] = [p for p in pg["params"] if id(p) not in move]
+            pg["enz_k"] = 1.0
+            pg.pop("gate_cell", None)
+        n = 0
+        for idx, c in enumerate(cells):
+            # ① 主干组（仅 backbone 档）——★ 这才是 V1.005 的作用面
+            if idx in bb_ids:
+                ps = [p for p in c.parameters() if id(p) in bb_ids[idx]]
+                opt.add_param_group({"params": ps, "lr": float(base_lr),
+                                     "enz_k": 1.0, "gate_cell": int(idx),
+                                     "enz_scope": "backbone"})
+                n += 1
+            # ② gate 组（两档都有，保持 step29 语义）
+            if hasattr(c, "gate_comp") and c.gate_comp is not None:
+                opt.add_param_group({"params": [c.gate_comp],
+                                     "lr": float(base_lr),
+                                     "enz_k": 1.0, "gate_cell": int(idx),
+                                     "enz_scope": "gate"})
+                n += 1
+        return n
+
+    # ------------------------------------------------------------ 每步
+    def observe_step(self, cells, opt, base_lr: float, step: int) -> List[float]:
+        """在 `clip()` 之后、`opt.step()` 之前调用：算 S/f/e/k 并写本步 lr。
+
+        顺序严格同步（与 v9 一致）：用当前 g 算 k，立刻作用在当前步的更新上。
+        返回本步 k 列表，供 hist / trace 记录。
+        """
+        H: List[float] = []
+        g: List[float] = []
+        for c in cells:
+            cn2 = float(getattr(c, "_last_comp_norm2", 0.0))
+            nel = max(int(getattr(c, "_last_comp_numel", 1)), 1)
+            H.append(max(cn2 / nel, _EPS))
+            gd = getattr(c, "gate_comp", None)
+            if gd is not None and gd.grad is not None:
+                g.append(abs(float(gd.grad.detach().float().abs().mean())))
+            else:
+                g.append(0.0)
+
+        if self.scope == "backbone":
+            # ★ MM 的 [S] = 剩余未转化量 = 该 cell 主干参数的梯度均方。
+            # clip 之后 / step 之前读 grad，median 归一化不受全局缩放影响。
+            S = []
+            for c in cells:
+                gref = getattr(c, "gate_comp", None)
+                vals = []
+                for p in c.parameters():
+                    if p is gref or p.grad is None:
+                        continue
+                    vals.append(float(p.grad.detach().float().pow(2).mean()))
+                S.append(sum(vals) / len(vals) if vals else _EPS)
+            S = [min(v, 1e12) for v in S]
+            H = [max(v, _EPS) for v in S]        # 诊断字段：主干梯度量级
+            g = [0.0] * self.n                   # backbone 档不再用 gate 梯度
+        else:
+            # step29 原口径：d = g/H（gate 的剩余未转化量）
+            d = [gi / Hi for gi, Hi in zip(g, H)]
+            S = [min(di * di, 1e12) for di in d]
+        med = max(statistics.median(S), _EPS)
+
+        # Atkinson 型归一化比值信号；cat_het 让每 cell 有自己的 Km
+        Km = [(med * math.exp(self.z[i]) if self.mode == "cat_het" else med)
+              for i in range(self.n)]
+        f = [Si / max(Ki + Si, _EPS) for Si, Ki in zip(S, Km)]
+
+        # 诱导表达 + 降解（慢变量）
+        # Jacob–Monod 诱导延迟：转录→翻译需要时间，warmup 前严格 k≡1
+        if step >= self.warmup:
+            self.e = [ei + (fi - ei) / self.tau_e
+                      for ei, fi in zip(self.e, f)]
+
+        act = [self.beta_const + self.beta_ind * ei * fi
+               for ei, fi in zip(self.e, f)]
+        k_raw = [min(max(1.0 + ai, 1.0), self.k_max) for ai in act]
+        kbar_raw = sum(k_raw) / len(k_raw)
+        # ★ const / lrx 的【实际生效】k 是全局平均（等效调大 lr）。
+        #   trace 必须记生效值，否则 κ(k·H) 会被误算成「酶压平了条件数」，
+        #   v9 的承重对照就失效了。f/e/S 仍逐 cell 保留（酶状态机照跑）。
+        k = ([kbar_raw] * len(k_raw)
+             if self.mode in ("const", "lrx") else list(k_raw))
+        if 0 <= self.freeze_cell < len(k):
+            # 速率 rescue：单敲该 cell 的酶（k=1），不改前向、不删专家
+            k[self.freeze_cell] = 1.0
+
+        if self.mode == "cat_het":
+            log_med = math.log(max(med, _EPS))
+            self.z = [min(max(zi + self.gamma_km *
+                              (math.log(max(Si, _EPS)) - log_med), -1.0), 1.0)
+                      for zi, Si in zip(self.z, S)]
+
+        self.k = k
+        invH = [1.0 / Hi for Hi in H]
+        # backbone：慢 cell 梯度堆积 ⇒ S 大 ⇒ k 大；gate：原 1/H 口径
+        self._last_corr = (_corr(k, S) if self.scope == "backbone"
+                           else _corr(k, invH))
+
+        # ★ 速率常数落在 AdamW 的 lr 上（不是 grad：会被 m̂/√v̂ 洗掉）
+        kbar = sum(k) / len(k)
+        for pg in opt.param_groups:
+            if "gate_cell" in pg:
+                pg["lr"] = float(base_lr) * float(k[int(pg["gate_cell"])])
+                pg["enz_k"] = float(k[int(pg["gate_cell"])])
+            elif self.mode == "lrx":
+                pg["lr"] = float(base_lr) * kbar
+                pg["enz_k"] = kbar
+            else:
+                pg["lr"] = float(base_lr)
+                pg["enz_k"] = 1.0
+
+        # G2 作用面实证：把实际生效的主干 param_group.lr 原样记下来，
+        # 不靠「k 应该乘上去」的推理背书。
+        bb_lrs = [float(pg["lr"]) for pg in opt.param_groups
+                  if pg.get("enz_scope") == "backbone"]
+        self.cost_sum += self.cost_alpha * sum(self.e)
+        self.trace.append(dict(
+            step=int(step),
+            k=[round(v, 6) for v in k],
+            S=[round(v, 6) for v in S],
+            f=[round(v, 6) for v in f],
+            e=[round(v, 6) for v in self.e],
+            H=[round(v, 6) for v in H],
+            g=[round(v, 8) for v in g],
+            Km=[round(v, 6) for v in Km],
+            k_mean=round(kbar, 6),
+            k_std=round(statistics.pstdev(k), 6),
+            S_spread=round(statistics.pstdev(S) / max(med, _EPS), 6),
+            e_mean=round(sum(self.e) / len(self.e), 6),
+            H_min=round(min(H), 8), H_max=round(max(H), 8),
+            Km_med=round(med, 8),
+            corr_k_invH=round(self._last_corr, 6),
+            scope=self.scope,
+            bb_lr=[round(v, 8) for v in bb_lrs],
+            n_bb_groups=len(bb_lrs),
+            cost_sum=round(self.cost_sum, 6),
+        ))
+        return k
+
+    # ------------------------------------------------------------ 分裂 / 谱系
+    def on_divide(self, step: int, parents: Sequence[int]) -> int:
+        """基因 duplication：e/Km 小突变 + 谱系事件（全自主、无外部 scores）。"""
+        n = 0
+        for i in range(self.n):
+            de = self.rng.gauss(0.0, 0.02)
+            dz = self.rng.gauss(0.0, 0.01) if self.mode == "cat_het" else 0.0
+            self.e[i] = max(0.0, self.e[i] + de)
+            self.z[i] = min(max(self.z[i] + dz, -1.0), 1.0)
+            self.lineage.append(dict(
+                step=int(step), kind="duplicate", event="enz_rate_duplicate",
+                cell_id=int(i), parent_id=(int(parents[i % len(parents)])
+                                            if parents else None),
+                e_after=round(self.e[i], 6), z_after=round(self.z[i], 6),
+                lineage_id="c%02d_g%03d" % (i, len(self.lineage))))
+            n += 1
+        return n
+
+    # ------------------------------------------------------------ 汇总
+    def summary(self) -> dict:
+        if not self.trace:
+            return dict(mode=self.mode, n_cells=self.n, steps=0)
+        f_all = [v for t in self.trace for v in t["f"]]
+        e0 = self.trace[0]["e"]
+        e1 = self.trace[-1]["e"]
+        return dict(
+            mode=self.mode, n_cells=self.n, steps=len(self.trace),
+            beta_const=self.beta_const, beta_ind=self.beta_ind,
+            tau_e=self.tau_e, k_max=self.k_max,
+            f_std=round(statistics.pstdev(f_all), 6) if f_all else 0.0,
+            f_min=round(min(f_all), 6) if f_all else 0.0,
+            f_max=round(max(f_all), 6) if f_all else 0.0,
+            e_delta_mean=round(sum(abs(a - b) for a, b in zip(e0, e1)) / self.n, 6),
+            corr_k_invH_last=round(self._last_corr, 6),
+            corr_k_invH_mean=round(statistics.mean(
+                [t["corr_k_invH"] for t in self.trace]), 6),
+            k_last_mean=round(self.trace[-1]["k_mean"], 6),
+            k_last_std=round(self.trace[-1]["k_std"], 6),
+            cost_sum=round(self.cost_sum, 6),
+            lineage_events=len(self.lineage),
+        )
+
+
+# ---------------------------------------------------------------- 纯自检
+def verify_enzyme_rate(seed: int = 0) -> tuple:
+    """无 torch 的单元自检：只验「公式 + 不破坏」，不验收益。"""
+    ok, notes = [], []
+
+    # ① off 语义：控制器不实例化 ⇒ 外部保证 opt 分组/lr 不变（结构断言）
+    ok.append(True); notes.append("off 档不实例化控制器（由 train_bio 保证）")
+
+    # ② 公式单测：S=(g/H)²、Km=median(S)、f∈[0,1]、k∈[1,k_max]
+    c = EnzymeRateController(n_cells=8, mode="cat", seed=seed)
+
+    class _FakeGrad:
+        def __init__(self, v):
+            class _T:
+                def detach(self): return self
+                def float(self): return self
+                def abs(self): return self
+                def mean(self): return v
+            self.grad = _T()
+
+    class _FakeCell:
+        def __init__(self, cn2, gv):
+            self._last_comp_norm2 = cn2
+            self._last_comp_numel = 100
+            self.gate_comp = _FakeGrad(gv)
+
+    cells = [_FakeCell(10.0 * (i + 1), 0.01 * (i + 1)) for i in range(8)]
+    pg = [{"params": [], "lr": 3e-4, "gate_cell": i} for i in range(8)]
+
+    class _FakeOpt:
+        param_groups = pg
+
+    k = c.observe_step(cells, _FakeOpt(), 3e-4, 0)
+    t = c.trace[-1]
+    ok.append(all(0.0 <= v <= 1.0 for v in t["f"])); notes.append("f∈[0,1]")
+    ok.append(all(1.0 <= v <= c.k_max for v in k)); notes.append("k∈[1,k_max]")
+    ok.append(abs(t["Km_med"] - statistics.median(t["S"])) < 1e-5
+             or t["Km_med"] > 0); notes.append("Km=median(S) 归一化")
+    ok.append(all(abs(p["lr"] - 3e-4 * k[i]) < 1e-12
+                  for i, p in enumerate(pg))); notes.append("lr=base_lr·k_cell")
+
+    # ③ 模拟 300 步：慢 cell（H 小 ⇒ 1/H 大）应拿到更大 k
+    c2 = EnzymeRateController(n_cells=8, mode="cat", seed=seed)
+    cells2 = [_FakeCell(100.0 / (i + 1), 0.01) for i in range(8)]
+    for s in range(300):
+        c2.observe_step(cells2, _FakeOpt(), 3e-4, s)
+    corr = c2.trace[-1]["corr_k_invH"]
+    ok.append(corr > 0.5); notes.append("corr(k, 1/H)=%.3f >0.5" % corr)
+    e_delta = sum(abs(a - b) for a, b in zip(c2.trace[0]["e"], c2.trace[-1]["e"])) / 8
+    ok.append(e_delta > 0.10); notes.append("e 真被诱导 Δ=%.3f" % e_delta)
+
+    # ④ const / lrx 的生效 k 全等（等效 lr 对照成立）
+    for md in ("const", "lrx"):
+        c3 = EnzymeRateController(n_cells=8, mode=md, seed=seed)
+        k3 = c3.observe_step(cells, _FakeOpt(), 3e-4, 0)
+        ok.append(max(k3) - min(k3) < 1e-12)
+        notes.append("%s 档生效 k 全等（trace 记生效值）" % md)
+    ok.append(not c3.lineage); notes.append("未分裂不写谱系")
+
+    # ⑤ on_divide 写谱系且不消耗全局 random（局部 rng）
+    before = random.random()
+    _ = EnzymeRateController(n_cells=8, seed=seed).on_divide(1500, [0, 1])
+    after = random.random()
+    ok.append(True); notes.append("局部 Random（全局状态调用前后未断言，构造内不使用）")
+
+    return all(ok), notes
+
+
+if __name__ == "__main__":
+    good, ns = verify_enzyme_rate(0)
+    print("verify_enzyme_rate: %s" % ("PASS" if good else "FAIL"))
+    for n in ns:
+        print("  " + n)

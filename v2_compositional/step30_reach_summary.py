@@ -1,0 +1,248 @@
+# -*- coding: utf-8 -*-
+"""step30 主判据：V1.005 —— 酶作用面到主干后，是否真「更早到 / 更省」。
+
+跑前写死（不事后挑数）：
+  主指标  T_ε = 插值的 loss≤1.30 到达步数（3000 步历史可达，300 步不可达）
+          渐近率 = step≥1000 上 log(loss−floor) 的线性斜率绝对值
+          AUC = loss 曲线下面积（阈值无关）
+          终态 val 只作「不劣于」门禁，不作排序目标
+  G2  bb_* 必须有 16 个主干 param_group 且 lr 真分化（作用面实证）
+  G3  bb_cat 必须【同时】赢过 bb_const 与 lrx（5/5 同号才算方向），
+      且 gate_cat 相对 A0_B 打平（作用面因果的阴性对照）
+  单 seed 仅方向，不叫显著；永远不写「加速」（wall-clock 不在本判据内）
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import statistics
+import sys
+
+V4 = os.environ.get("V4DIR", "output/v4")
+THR = float(os.environ.get("THR", "1.30"))
+FIELDS = ["loss", "eff", "lr", "var_norm", "clip_main", "composed_width"]
+
+
+def L(t):
+    p = os.path.join(V4, t + ".json")
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+
+
+def reach(h, thr):
+    for i in range(1, len(h)):
+        a, b = h[i - 1], h[i]
+        if b["loss"] <= thr:
+            if a["loss"] <= thr:
+                return float(a["step"])
+            f = (a["loss"] - thr) / max(a["loss"] - b["loss"], 1e-12)
+            return a["step"] + f * (b["step"] - a["step"])
+    return None
+
+
+def auc(h):
+    return sum((h[i]["loss"] + h[i - 1]["loss"]) / 2.0 *
+               (h[i]["step"] - h[i - 1]["step"])
+               for i in range(1, len(h)))
+
+
+def asym_rate(h, floor):
+    xs, ys = [], []
+    for x in h:
+        if x["step"] >= 1000 and x["loss"] - floor > 1e-6:
+            xs.append(float(x["step"])); ys.append(math.log(x["loss"] - floor))
+    if len(xs) < 4:
+        return None
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    den = sum((x - mx) ** 2 for x in xs)
+    if den < 1e-12:
+        return None
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+    return -slope
+
+
+def fmt(v, spec="%.1f"):
+    return "None" if v is None else spec % v
+
+
+def main():
+    tags = [x for x in sys.argv[1:] if x.strip()]
+    if not tags and os.path.exists("step30_tags.txt"):
+        tags = [x.strip() for x in open("step30_tags.txt") if x.strip()]
+    print("=" * 88)
+    print("step30 V1.005 判据 | THR=%.2f | V4=%s | 档数=%d" % (THR, V4, len(tags)))
+    print("=" * 88)
+
+    D = {t: L(t) for t in tags}
+    have = {t: d for t, d in D.items() if d is not None}
+
+    # ---------------- [0] G1 零污染 ----------------
+    print("\n[0] G1 零污染硬前置（同配置基线；配置不同只 SKIP，不误判停线）")
+    off = next((t for t in tags if "_A0_B" in t), None)
+    ref = next((t for t in tags if "ref" in t and "nopatch" in t), None)
+    state = None
+    if off and off in have:
+        d = have[off]
+        print("  off 档 enz_rate_trace 长度=%d（应为 0）  enz_scope=%s" %
+              (len(d.get("enz_rate_trace", [])), d.get("enz_scope", "off")))
+        if ref and ref in have:
+            r = have[ref]
+            same = (r.get("config", {}).get("max_steps") ==
+                    d.get("config", {}).get("max_steps"))
+            if not same:
+                state = None
+                print("  [U3] SKIP：参考系不可比（max_steps 不同）→ 不判停线")
+            else:
+                ha = {x["step"]: x for x in r["history"]}
+                hb = {x["step"]: x for x in d["history"]}
+                cs = sorted(set(ha) & set(hb))
+                md = {}
+                for f in FIELDS:
+                    pts = [(float(ha[s][f]), float(hb[s][f])) for s in cs
+                           if f in ha[s] and f in hb[s]
+                           and ha[s][f] is not None and hb[s][f] is not None]
+                    if pts:
+                        md[f] = max(abs(x - y) for x, y in pts)
+                state = bool(cs) and bool(md) and all(v == 0.0 for v in md.values())
+                print("  [U3] 对齐点=%d  %s  → %s" %
+                      (len(cs), " ".join("%s=%.3e" % (k, v) for k, v in md.items()),
+                       "PASS" if state else "FAIL"))
+        else:
+            state = None
+            print("  [U3] SKIP：无同配置基线；真 301 点留给 FULL --zero-check")
+    else:
+        print("  ⚠ 无 A0_B json")
+        state = False
+    print("  → %s" % ("PASS → 地基干净，可往下读" if state is True else
+                      "SKIP（不判停线）" if state is None else
+                      "FAIL → 回滚 *.bak_step30，停线，别读下面任何一行"))
+
+    # ---------------- [1] G2 作用面 ----------------
+    print("\n[1] G2 作用面实证（16 份主干 param_group）")
+    g2 = True
+    for t in tags:
+        d = have.get(t)
+        if not d:
+            continue
+        tr = d.get("enz_rate_trace", [])
+        ns = sorted(set(x.get("n_bb_groups", -1) for x in tr)) if tr else []
+        lrs = [x.get("bb_lr", []) for x in tr if x.get("bb_lr")]
+        stds = [statistics.pstdev(v) for v in lrs if len(v) > 1]
+        print("  %-26s scope=%-9s n_bb=%-10s maxstd(lr)=%.3e" %
+              (t, d.get("enz_scope", "off"), str(ns),
+               max(stds) if stds else 0.0))
+        if "bb_" in t and "lrx" not in t and "const" not in t:
+            if not ns or ns != [16] or not stds or max(stds) <= 0:
+                g2 = False
+    print("  G2 主干 lr 真分化 : %s" % ("PASS" if g2 else "FAIL / 数据不足"))
+
+    # ---------------- [2] 主指标 ----------------
+    print("\n[2] 主指标（T_ε 固定绝对阈值 / 渐近率 / AUC / 终态门禁）")
+    floors = [min(x["loss"] for x in d["history"]) for d in have.values()
+              if d.get("history")]
+    floor = min(floors) if floors else 0.0
+    print("  floor=%.6f（全部档最小 loss，供渐近率）" % floor)
+    print("  %-26s %10s %11s %10s %11s %9s" %
+          ("tag", "T_ε", "渐近率", "AUC", "val", "门禁"))
+    M = {}
+    for t in tags:
+        d = have.get(t)
+        if not d or not d.get("history"):
+            print("  %-26s  MISSING" % t); continue
+        h = d["history"]
+        te = reach(h, THR); ar = asym_rate(h, floor)
+        ac = auc(h); vl = d.get("val_loss", h[-1]["loss"])
+        M[t] = dict(t=te, ar=ar, auc=ac, val=vl)
+        base = M.get(off, {}).get("val", vl) if off else vl
+        gate = "PASS" if vl <= base + 1e-6 else "FAIL"
+        print("  %-26s %10s %11s %10.1f %11.6f %9s" %
+              (t, fmt(te), fmt(ar, "%.5f"), ac, vl, gate))
+
+    unreachable = sum(1 for v in M.values() if v["t"] is None)
+    if unreachable == len(M) and M:
+        print("  ⚠ 全部 T_ε=None：多半是 300 步档（THR=1.30 为 3000 步校准），"
+              "不是负结果；下面 [3] 用 AUC/渐近率作描述性参考")
+
+    # ---------------- [3] G3 承重对照 ----------------
+    print("\n[3] G3 承重对照（负=前者更好；bb_cat 必须同时赢 bb_const 与 lrx）")
+    def pick(key):
+        return next((t for t in M if key in t and "ref" not in t
+                     and "nopatch" not in t), None)
+    a0 = pick("A0_B") or off
+    gc = pick("gate_cat")
+    bc = pick("bb_cat")
+    co = pick("bb_const")
+    lx = pick("lrx")
+    rows = [(gc, a0, "gate_cat−A0（应打平）"), (bc, a0, "bb_cat−A0"),
+            (bc, co, "bb_cat−bb_const"), (bc, lx, "bb_cat−lrx")]
+    vals = {}
+    for a, b, name in rows:
+        if not a or not b or a not in M or b not in M:
+            print("  %-24s = n/a" % name); continue
+        for key, unit in [("auc", ""), ("val", ""), ("t", "步"), ("ar", "")]:
+            x, y = M[a][key], M[b][key]
+            if x is None or y is None:
+                print("  %-24s %-4s = n/a" % (name, key)); continue
+            dv = x - y
+            vals[(a, b, key)] = dv
+            print("  %-24s %-4s = %+.5f %s" % (name, key, dv, unit))
+    ok_sep = True
+    for b in (co, lx):
+        if not bc or not b:
+            ok_sep = False; continue
+        d1 = vals.get((bc, b, "auc")); d2 = vals.get((bc, b, "t"))
+        good = (d1 is not None and d1 < 0) or (d2 is not None and d2 < 0)
+        print("  → bb_cat vs %-12s : %s" %
+              (b.split("_")[-1] if b else "?", "赢" if good else "未赢/无数据"))
+        ok_sep = ok_sep and good
+    flat = vals.get((gc, a0, "auc"))
+    print("  → gate_cat 打平 A0 : %s (%s)" %
+          ("PASS" if flat is not None and abs(flat) < 2.0 else "见数值",
+           "n/a" if flat is None else "%+.4f" % flat))
+    print("  → G3 与等效 lr 严格可分 : %s" % ("PASS" if ok_sep else "FAIL"))
+
+    # ---------------- [4] κ 代理 ----------------
+    print("\n[4] κ_eff 代理：spread(k·S) 应小于 spread(S)（酶压平局部曲率）")
+    for t in tags:
+        d = have.get(t)
+        if not d or not d.get("enz_rate_trace"):
+            continue
+        q = d["enz_rate_trace"][-1]
+        S, k = q.get("S", []), q.get("k", [])
+        if len(S) < 2 or len(k) != len(S):
+            continue
+        def sp(v):
+            v = [x for x in v if x and math.isfinite(x) and x > 0]
+            return max(v) / max(min(v), 1e-12) if len(v) >= 2 else 0.0
+        r1, r2 = sp(S), sp([a * b for a, b in zip(k, S)])
+        print("  %-26s κ(S)=%8.2f  κ(k·S)=%8.2f  比=%.3f" %
+              (t, r1, r2, r2 / max(r1, 1e-12)))
+
+    # ---------------- [5] 双线成本 ----------------
+    print("\n[5] 双线成本（到 T_ε 的总算力 ∝ T + 累计酶成本）")
+    for t in tags:
+        d = have.get(t)
+        if not d:
+            continue
+        tr = d.get("enz_rate_trace", [])
+        cost = tr[-1].get("cost_sum", 0.0) if tr else 0.0
+        te = M.get(t, {}).get("t")
+        print("  %-26s T_ε=%-9s Σcost=%9.3f  %s" %
+              (t, fmt(te), cost,
+               "不计（未达阈值）" if te is None else "T+cost=%.1f" % (te + cost)))
+
+    # ---------------- 判读 ----------------
+    print("\n" + "=" * 88)
+    print("【判读 · 跑前写死】")
+    print("  [0] FAIL → 回滚 *.bak_step30，停线；[0] SKIP → 不是停线，301 点留给 FULL")
+    print("  [1] G2 FAIL → 主干没吃到 k_i，实验等于没做，贴日志，不进 FULL")
+    print("  [3] G3 PASS 且 T_ε(bb_cat) 明显更小 → 速率常数型酶在拼专家里成立")
+    print("  [3] G3 FAIL / 打平 → 与等效 lr 不可分，如实收口，不调 β/Km 硬凑")
+    print("  单 seed 仅方向，不叫显著；终态 val 只是门禁")
+    print("  永远不写『加速』：wall-clock / avg_step 三档对比不在本判据内")
+    print("=" * 88)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

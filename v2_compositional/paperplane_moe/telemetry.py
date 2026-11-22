@@ -1,0 +1,201 @@
+# -*- coding: utf-8 -*-
+"""paperplane-Moe · 观测层（手写笔记规格 5 / 11 / 13 的代码落地）。
+
+V1.000 的三项欠账里，「实验的数据一定要全 + 临时专家的忆点和调用的细胞记录」
+此前只写在文档里。本模块把它变成【真正会写进 json 的 events】：
+
+    divide / wire / cell_call / temp_module / temp_expert /
+    temp_expert_dissolve / mem_kind / budget / transport / health /
+    autophagy / apoptosis / clone / reset
+
+关键纪律（来自 st25_s0_B 与 b5_E1_split 的 301 点逐位对照）：
+    · 观测层只 append 事件，绝不改 model 的任何张量 / 参数 / RNG / optimizer；
+    · 判据比对 events 时用【数值字段白名单】，忽略 cell_type 那类元数据，
+      避免把「多一个字段」误判成训练差异；
+    · 每个 temp_expert 必须有 dissolved_at（规格 13 硬验收）。
+"""
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+from .biology import CellLineage
+
+# 规格 11/13 要求的事件类别全集（写进 rec['event_schema'] 供重放核对）
+REQUIRED_EVENT_KINDS = (
+    "divide", "wire", "cell_call", "temp_module",
+    "temp_expert", "temp_expert_dissolve",
+    "mem_kind", "budget", "transport", "health",
+    "autophagy", "apoptosis", "clone", "reset",
+    # V1.003 酶学全事件（规格 11/13：数据要全、谱系可重放）
+    "enzyme_birth", "enzyme_duplication", "enzyme_autophagy",
+    "enzyme_state", "substrate", "atp_supply", "product_inhibition",
+)
+
+# 观测层必填：即使所有生物学原语关闭（BioConfig.enable=False）也必须写。
+# 后 4 类只有原语真正启用/调用时才产生，不写不算数据缺失（见 disabled_primitives）。
+CORE_EVENT_KINDS = (
+    "divide", "wire", "cell_call", "temp_module",
+    "temp_expert", "temp_expert_dissolve",
+    "mem_kind", "budget", "transport", "health",
+)
+
+# 数值字段白名单：判据逐位比对时只比这些，忽略元数据字段
+NUMERIC_FIELDS = (
+    "step", "K", "loss", "eff", "var_norm", "share", "fitness", "lifespan",
+    "budget", "spent", "balance", "w_sum", "w_min", "val_delta",
+    "created_at", "dissolved_at", "delta_w_cleared", "cell_id",
+    # V1.003：酶浓度 / kcat / Km / 催化系数 / 产物抑制 全进白名单
+    "slot_id", "enzyme_id", "lineage_id", "parent_id", "birth_step",
+    "kcat", "Km", "specificity", "conc", "vmax", "sat", "substrate_S",
+    "catalytic_c", "product_ema", "atp_ratio", "n_alive", "lifespan",
+    "mutation_scale", "conc_total", "vmax_total", "inhibition",
+)
+
+
+class TelemetryRecorder:
+    """累积事件，最后 flush 进 train 的 events 列表（与历史 json 结构兼容）。"""
+
+    def __init__(self, cfg=None, n_cells: int = 0, n_organelles: int = 0):
+        self.cfg = cfg
+        self.n_cells = n_cells
+        self.n_organelles = n_organelles
+        self.events: List[dict] = []
+        self._task_counter = 0
+
+    # ------------------------------------------------------------ 基础
+    def emit(self, kind: str, step: int, **fields) -> dict:
+        ev = {"step": int(step), "kind": kind}
+        ev.update(fields)
+        if "event" not in ev:
+            ev["event"] = kind
+        self.events.append(ev)
+        return ev
+
+    def flush_to(self, events: List[dict]) -> int:
+        n = len(self.events)
+        events.extend(self.events)
+        self.events.clear()
+        return n
+
+    # ------------------------------------------------------------ 规格 5 · 分裂/接线
+    def on_divide(self, step: int, n0: int, K: int, parents: List[int],
+                  cell_type: str, budget_before: float, budget_after: float) -> dict:
+        return self.emit("divide", step, event="divide", K=int(K),
+                         parents=list(parents),
+                         child_ids=list(range(n0, n0 + K)),
+                         n0=int(n0), cell_type=cell_type,
+                         reason="fitness_topk",
+                         budget_before=budget_before, budget_after=budget_after)
+
+    def on_wire(self, step: int, child_w: List[float]) -> dict:
+        return self.emit("wire", step, event="wire",
+                         child_w=[round(float(v), 6) for v in child_w],
+                         wiring_restored=True)
+
+    # ------------------------------------------------------------ 规格 11/13 · 调用链
+    def on_cell_call(self, step: int, cells: List[int], eff: float,
+                     var_norm: float, gain: float) -> dict:
+        return self.emit("cell_call", step, cells=list(cells),
+                         call_chain=list(cells), eff=float(eff),
+                         var_norm=float(var_norm), mod_gain=float(gain))
+
+    def on_mem_kind(self, step: int, n_info: int, n_task: int,
+                    kind: str, mid: str, task_id: str = "") -> dict:
+        return self.emit("mem_kind", step, mem_kind=kind, mem_id=mid,
+                         task_id=task_id, n_info=int(n_info), n_task=int(n_task))
+
+    def on_budget(self, step: int, spent: float, balance: float,
+                  reason: str) -> dict:
+        return self.emit("budget", step, spent=float(spent),
+                         balance=float(balance), reason=reason)
+
+    def on_transport(self, step: int, mode: str, layer: int, gain: float) -> dict:
+        return self.emit("transport", step, mode=mode, layer=int(layer),
+                         gain=float(gain), mid_hub=(layer == 2))
+
+    def on_health(self, step: int, eff: float, var_norm: float,
+                  all_nonzero: bool, fitness_min: float) -> dict:
+        return self.emit("health", step, eff=float(eff),
+                         var_norm=float(var_norm),
+                         all_weights_nonzero=bool(all_nonzero),
+                         fitness_min=float(fitness_min))
+
+    # ------------------------------------------------------------ 规格 7/8 · 复制 / 重置
+    def on_clone(self, step: int, cell_id: int, training: bool) -> dict:
+        return self.emit("clone", step, cell_id=int(cell_id),
+                         training=bool(training),
+                         allowed=bool(not training))
+
+    def on_reset(self, step: int, cell_id: int, container_kept: bool = True) -> dict:
+        return self.emit("reset", step, cell_id=int(cell_id),
+                         container_kept=bool(container_kept),
+                         all_info_cleared=True)
+
+    # ------------------------------------------------------------ 规格 6/13 · 临时模组
+    def open_temp_module(self, temp_mod, step: int, wiring,
+                         cells: List[int], mem_refs: List[str]) -> dict:
+        self._task_counter += 1
+        task_id = "task-%04d" % self._task_counter
+        ev = temp_mod.open(step, task_id, wiring, cells, mem_refs)
+        self.emit("temp_module", step, module_id=ev["module_id"],
+                  task_id=task_id, cells=list(cells))
+        self.events.append(ev)                     # kind=temp_expert
+        return ev
+
+    def dissolve_temp_module(self, temp_mod, step: int,
+                             val_delta: float = 0.0) -> Optional[dict]:
+        if not temp_mod.active:
+            return None
+        ev = temp_mod.dissolve(step, val_delta)
+        self.events.append(ev)
+        return ev
+
+    # ------------------------------------------------------------ 规格 11 · 完整性
+    def schema(self) -> dict:
+        return {"version": "V1.001",
+                "required_kinds": list(REQUIRED_EVENT_KINDS),
+                "numeric_fields": list(NUMERIC_FIELDS),
+                "temp_module": ["step", "task_id", "module_id", "kind",
+                                "cells", "w", "mem_refs", "call_chain",
+                                "created_at", "dissolved_at", "val_delta"],
+                "note": "判据比对只比 numeric_fields；元数据字段不参与逐位对照"}
+
+
+def validate_events(events: List[dict], strict: bool = True,
+                    observation_only: bool = True) -> dict:
+    """规格 11/13 的可执行验收：任意 json 都能重放完整谱系与调用链。
+
+    observation_only=True（默认）：只要求 CORE_EVENT_KINDS，适用于
+    BioConfig.enable=False 的「纯观测层」档；原语全开时传 False 验 14 类。
+    """
+    kinds = {ev.get("kind", ev.get("event", "")) for ev in events}
+    required = CORE_EVENT_KINDS if observation_only else REQUIRED_EVENT_KINDS
+    missing = [k for k in required if k not in kinds]
+    opened = {ev.get("module_id") for ev in events
+              if ev.get("kind") == "temp_expert"}
+    dissolved = {ev.get("module_id") for ev in events
+                 if ev.get("kind") == "temp_expert_dissolve"
+                 and ev.get("dissolved_at") is not None}
+    orphan = sorted(opened - dissolved)
+    no_dissolve_at = [ev.get("module_id") for ev in events
+                      if ev.get("kind") == "temp_expert_dissolve"
+                      and ev.get("dissolved_at") is None]
+    lin = CellLineage.replay(events)
+    out = {"n_events": len(events), "kinds_present": sorted(kinds),
+           "missing_kinds": missing, "orphan_temp_modules": orphan,
+           "dissolve_missing_at": no_dissolve_at,
+           "lineage": lin.summary(),
+           "pass": (not missing) and (not orphan) and (not no_dissolve_at)}
+    if strict and not out["pass"]:
+        raise AssertionError("观测层不完整: %s" % out)
+    return out
+
+
+def replay_lineage(events: List[dict]) -> dict:
+    """对外便捷重放入口（__init__.py 导出）。"""
+    return CellLineage.replay(events).summary()
+
+
+def numeric_projection(ev: dict) -> dict:
+    """判据用：只保留数值字段白名单，忽略 cell_type / tag 之类元数据。"""
+    return {k: ev[k] for k in NUMERIC_FIELDS if k in ev}

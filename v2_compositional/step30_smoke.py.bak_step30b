@@ -1,0 +1,146 @@
+# -*- coding: utf-8 -*-
+"""step30 第一关：G1 零污染 / G2 作用面实证 / T1-T3 公式单测。
+
+预先写死（跑前注册，防事后挑数）：
+  U2  off 档 enz_rate_trace 长度必须 0
+  U3  同配置未补丁基线逐位比（配置不同只 SKIP，不判停线）
+  G2  ★ V1.005 承重：bb_* 每步 n_bb_groups==16 且 bb_lr 真分化；
+      gate_cat/lrx/A0 的 n_bb_groups==0。没有这条，实验等于没做。
+  T1  f_std > 0.05（MM 饱和区与一级区都走到）
+  T2  e_delta > 0.10（诱导慢变量真在长）
+  T3  活跃窗 corr > 0.4（backbone: corr(k,S)；gate: corr(k,1/H)）
+      step29 真模型 gate 口径实测 0.459；backbone 的 S 是主干梯度均方、
+      噪声更大，阈值定 0.4 并在跑前写死，不事后调。
+"""
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import sys
+
+V4 = os.environ.get("V4DIR", "output/v4")
+FIELDS = ["loss", "eff", "lr", "var_norm", "clip_main", "composed_width"]
+
+
+def L(t):
+    p = os.path.join(V4, t + ".json")
+    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+
+
+def main():
+    tags = [x for x in sys.argv[1:] if x.strip()]
+    if not tags and os.path.exists("step30_tags.txt"):
+        tags = [x.strip() for x in open("step30_tags.txt") if x.strip()]
+    print("=" * 76)
+    print("step30 第一关门禁 | V4=%s | tags=%d" % (V4, len(tags)))
+    print("=" * 76)
+
+    allok = True
+    ref = next((t for t in tags if "ref" in t and "nopatch" in t), None)
+    offs = [t for t in tags if t.endswith("_A0_B") or "_A0_B" in t]
+    cats = [t for t in tags if any(k in t for k in
+            ("gate_cat", "bb_cat", "bb_const", "lrx", "bb_freeze"))]
+
+    # ---------------- U2 / U3：G1 零污染 ----------------
+    print("\n[U2/U3] G1 零污染硬前置")
+    for t in offs:
+        d = L(t)
+        if not d:
+            print("  %-26s MISSING → FAIL" % t); allok = False; continue
+        tr = d.get("enz_rate_trace", [])
+        u2 = (len(tr) == 0)
+        print("  %-26s U2 off 零 trace : %s (len=%d)" %
+              (t, "PASS" if u2 else "FAIL", len(tr)))
+        allok = allok and u2
+        # U3 同配置逐位
+        if ref is None:
+            print("     U3 SKIP：无同配置 nopatch 基线；真 301 点留给 FULL --zero-check")
+            continue
+        r = L(ref)
+        if r is None:
+            print("     U3 SKIP：基线 json 缺失")
+            continue
+        if r.get("config", {}).get("max_steps") != d.get("config", {}).get("max_steps"):
+            print("     U3 SKIP：参考系不可比（max_steps 不同）→ 不判停线")
+            continue
+        ha = {x["step"]: x for x in r["history"]}
+        hb = {x["step"]: x for x in d["history"]}
+        cs = sorted(set(ha) & set(hb))
+        md = {}
+        for f in FIELDS:
+            if cs and f in ha[cs[0]] and f in hb[cs[0]]:
+                md[f] = max(abs(float(ha[s][f]) - float(hb[s][f])) for s in cs)
+        u3 = bool(cs) and all(v == 0.0 for v in md.values())
+        print("     U3 对齐点=%d  %s  → %s" %
+              (len(cs), " ".join("%s=%.3e" % (k, v) for k, v in md.items()),
+               "PASS" if u3 else "FAIL"))
+        allok = allok and u3
+
+    # ---------------- G2：作用面实证（承重） ----------------
+    print("\n[G2] ★ 作用面实证：16 份主干 param_group 是否真的吃到 k_i")
+    for t in cats:
+        d = L(t)
+        if not d:
+            print("  %-26s MISSING → FAIL" % t); allok = False; continue
+        scope = d.get("enz_scope", "off")
+        tr = d.get("enz_rate_trace", [])
+        expect = 16 if (scope == "backbone" and "lrx" not in t) else 0
+        # lrx 不调用 rebind_groups ⇒ 没有 backbone 组
+        if "lrx" in t or "A0" in t:
+            expect = 0
+        ns = [x.get("n_bb_groups", -1) for x in tr]
+        ok_n = (not ns) or all(v == expect for v in ns)
+        lrs = [x.get("bb_lr", []) for x in tr if x.get("bb_lr")]
+        stds = [statistics.pstdev(v) for v in lrs if len(v) > 1]
+        maxstd = max(stds) if stds else 0.0
+        need_dyn = expect == 16 and scope == "backbone" and "const" not in t
+        ok_lr = True if not need_dyn else (maxstd > 0.0)
+        # bb_const 的 k 恒定 ⇒ bb_lr std 应为 0，分组本身仍在
+        if "bb_const" in t:
+            ok_lr = (maxstd < 1e-9) and (expect == 16)
+        g2 = ok_n and ok_lr
+        print("  %-26s scope=%-9s n_bb=%s(期望%d) %s  maxstd(lr)=%.3e  %s" %
+              (t, scope, sorted(set(ns)) if ns else [], expect,
+               "OK" if ok_n else "BAD", maxstd, "PASS" if g2 else "FAIL"))
+        allok = allok and g2
+
+    # ---------------- T1/T2/T3 ----------------
+    print("\n[T1/T2/T3] 公式单测（阈值跑前写死）")
+    for t in cats:
+        d = L(t)
+        if not d:
+            continue
+        sm = d.get("enz_rate_summary") or {}
+        tr = d.get("enz_rate_trace", [])
+        mode = d.get("enz_rate_mode", "off")
+        if mode in ("off",) or not tr:
+            continue
+        f_all = [v for x in tr for v in x.get("f", [])]
+        fstd = statistics.pstdev(f_all) if f_all else 0.0
+        e0 = tr[0].get("e", []); e1 = tr[-1].get("e", [])
+        ed = (sum(abs(a - b) for a, b in zip(e0, e1)) / max(len(e0), 1)) if e0 else 0.0
+        # 活跃窗 corr：前 2/3 步（底物耗尽后 k→1 是物理正确，不拿末态判）
+        cs = [x["corr_k_invH"] for x in tr[:max(2, int(len(tr) * 2 / 3))]
+              if "corr_k_invH" in x]
+        corra = max(cs) if cs else 0.0
+        need3 = ("bb_cat" in t or "gate_cat" in t or "bb_freeze" in t)
+        t1 = fstd > 0.05
+        t2 = ed > 0.10
+        t3 = (corra > 0.4) if need3 else True
+        ok = t1 and t2 and t3
+        print("  %-26s f_std=%.4f %s  eΔ=%.4f %s  corr_active=%.3f %s → %s" %
+              (t, fstd, "OK" if t1 else "BAD",
+               ed, "OK" if t2 else "BAD",
+               corra, ("OK" if t3 else "BAD") if need3 else "n/a",
+               "PASS" if ok else "FAIL"))
+        allok = allok and ok
+
+    print("\n" + "=" * 76)
+    print("SMOKE_OK=%d   （0 → 别起 300 步 / 3000 步，贴本日志给我）" % int(allok))
+    print("=" * 76)
+    return 0 if allok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

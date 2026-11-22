@@ -1,0 +1,204 @@
+# -*- coding: utf-8 -*-
+"""step29 第一关：20 步 smoke 的三条单元测试 + 零污染哨兵。
+
+纯标准库，只读 json，不跑训练、不改任何文件。
+判定全部预先写死：任一不过 ⇒ SMOKE_OK=0 ⇒ 不许起 300 步 / 3000 步。
+
+  T1  Km 标定未让 f 退化（活跃窗口 std(f)>0.05 且 0.05<median(f)<0.95）
+      —— MM 本来就有 S≪Km 的一级区(f→0) 与 S≫Km 的零级区(f→1)，
+         禁止 f 触及两端反而违反 MM；只验「没退化成常数」。
+  T2  诱导慢变量真变化（mean|e_end−e_start| > 0.10）
+  T3  酶压在瓶颈上（后半段 mean corr(k, 1/H) > 0.5）
+  U2  off 档 enz_rate_trace 为空、k 全 1、参数量对账
+  U3  A0 与归档 st25_s0_B 的共同 history 点 loss/eff 逐位相等（快速哨兵）
+
+用法：
+  python3 step29_smoke.py --self-test                    # 不读 json，跑公式单测
+  python3 step29_smoke.py st29_cat st29_const st29_lrx  # 读 json 判三档
+  SMOKE_TAGS="st29_cat st29_const" python3 step29_smoke.py
+"""
+import json
+import math
+import os
+import statistics
+import sys
+
+V4 = os.environ.get("V4DIR", "output/v4")
+
+
+def L(tag):
+    p = os.path.join(V4, tag + ".json")
+    if not os.path.exists(p):
+        raise SystemExit("缺 %s → smoke 还没跑完" % p)
+    return json.load(open(p, encoding="utf-8"))
+
+
+def corr(xs, ys):
+    n = min(len(xs), len(ys))
+    if n < 3:
+        return 0.0
+    xs, ys = xs[:n], ys[:n]
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= 1e-12 or vy <= 1e-12:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(vx * vy)
+
+
+def unit_checks(d, label):
+    """返回 (T1,T2,T3, 详细 dict)"""
+    tr = d.get("enz_rate_trace", [])
+    sm = d.get("enz_rate_summary") or {}
+    steps = len(tr)
+    if steps < 2:
+        return False, False, False, dict(reason="trace 为空或只有 1 步", steps=steps)
+
+    # ---- T1：活跃窗口 = 全过程（smoke 只有 20 步，全部算活跃）
+    f_all = [v for t in tr for v in t["f"]]
+    f_std = statistics.pstdev(f_all) if f_all else 0.0
+    f_med = statistics.median(f_all) if f_all else 0.0
+    T1 = (f_std > 0.05) and (0.05 < f_med < 0.95)
+
+    # ---- T2：诱导酶浓度确实变化
+    e0, e1 = tr[0]["e"], tr[-1]["e"]
+    e_delta = sum(abs(a - b) for a, b in zip(e0, e1)) / max(len(e0), 1)
+    T2 = e_delta > 0.10
+
+    # ---- T3：后半段 corr(k, 1/H)（用每步 trace 内的 corr 值，取后半段均值）
+    cs = [t["corr_k_invH"] for t in tr[steps // 2:]]
+    c_mean = statistics.mean(cs) if cs else 0.0
+    # 交叉校验：直接从 k / H 重算一次，防 trace 里的值写错
+    k_last, H_last = tr[-1]["k"], tr[-1]["H"]
+    c_recalc = corr(k_last, [1.0 / max(h, 1e-12) for h in H_last])
+    T3 = (c_mean > 0.5) and (c_recalc > 0.3)
+
+    return T1, T2, T3, dict(
+        steps=steps, f_std=round(f_std, 4), f_med=round(f_med, 4),
+        f_min=round(min(f_all), 4) if f_all else None,
+        f_max=round(max(f_all), 4) if f_all else None,
+        e_delta=round(e_delta, 4),
+        corr_mean=round(c_mean, 4), corr_recalc=round(c_recalc, 4),
+        k_last_mean=round(tr[-1]["k_mean"], 4),
+        k_last_std=round(tr[-1]["k_std"], 4),
+        H_min=tr[-1]["H_min"], H_max=tr[-1]["H_max"],
+        summary_corr=sm.get("corr_k_invH_mean"),
+    )
+
+
+def off_check(d, label):
+    tr = d.get("enz_rate_trace", [])
+    mode = d.get("enz_rate_mode", "off")
+    hist = d.get("history", [])
+    ks = [h.get("k_mean", 1.0) for h in hist]
+    ok = (mode == "off") and (len(tr) == 0) and all(abs(k - 1.0) < 1e-12 for k in ks)
+    return ok, dict(mode=mode, trace_len=len(tr), k_all_one=all(abs(k-1.0) < 1e-12 for k in ks))
+
+
+def sentinel(A, ref_tag="st25_s0_B"):
+    """U3：A0 与归档 B 档的共同点逐位相等（20 步只有 3 点，是哨兵不是硬前置）。"""
+    p = os.path.join(V4, ref_tag + ".json")
+    if not os.path.exists(p):
+        return None, dict(reason="缺 %s" % p)
+    r = json.load(open(p, encoding="utf-8"))
+    ha = {h["step"]: h for h in r["history"]}
+    hb = {h["step"]: h for h in A["history"]}
+    cs = sorted(set(ha) & set(hb))
+    if not cs:
+        return None, dict(reason="无共同点")
+    dl = max(abs(ha[s]["loss"] - hb[s]["loss"]) for s in cs)
+    de = max(abs((ha[s].get("eff") or 0) - (hb[s].get("eff") or 0)) for s in cs)
+    return (dl == 0.0 and de == 0.0), dict(points=len(cs), max_dloss=dl, max_deff=de)
+
+
+def self_test():
+    """不依赖 torch 的公式单测（install.sh 自检会调）。"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "paperplane_moe"))
+    try:
+        from enzyme_rate import verify_enzyme_rate
+    except ImportError:
+        from paperplane_moe.enzyme_rate import verify_enzyme_rate
+    good, notes = verify_enzyme_rate(0)
+    for n in notes:
+        print("  " + n)
+    return good
+
+
+def main():
+    if "--self-test" in sys.argv:
+        ok = self_test()
+        print("FORMULA_SELFTEST=%s" % ("PASS" if ok else "FAIL"))
+        raise SystemExit(0 if ok else 1)
+
+    tags = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not tags:
+        tags = os.environ.get("SMOKE_TAGS", "").split()
+    if not tags:
+        raise SystemExit("用法: python3 step29_smoke.py TAG [TAG ...]  或 --self-test")
+
+    print("=" * 78)
+    print("step29 第一关 smoke：三条单元测试（预先写死，任一不过即停线）")
+    print("V4DIR =", V4, " tags =", " ".join(tags))
+    print("=" * 78)
+
+    results = {}
+    for t in tags:
+        d = L(t)
+        mode = d.get("enz_rate_mode", "off")
+        print("\n--- %s (mode=%s, steps=%d) ---"
+              % (t, mode, len(d.get("enz_rate_trace", []))))
+        if mode == "off":
+            ok, info = off_check(d, t)
+            print("  [U2] off 档零污染: %s  %s" % ("PASS" if ok else "FAIL", info))
+            s, si = sentinel(d)
+            print("  [U3] 与 st25_s0_B 哨兵比对: %s  %s"
+                  % ("PASS" if s else ("SKIP" if s is None else "FAIL"), si))
+            results[t] = dict(off_ok=ok, sentinel=s)
+        elif mode == "amp" or "freeze" in t:
+            # 旧前向实现 / 速率 rescue 档：不参与三条单元测试门槛，只查身份
+            ok = (len(d.get("enz_rate_trace", [])) == 0)
+            print("  [身份] %s 档 trace 应为空: %s" % (mode, "PASS" if ok else "FAIL"))
+            results[t] = dict(identity_ok=ok)
+        else:
+            T1, T2, T3, info = unit_checks(d, t)
+            print("  [T1] f 动态 std=%.4f median=%.4f 范围=[%s,%s]  → %s"
+                  % (info["f_std"], info["f_med"], info["f_min"], info["f_max"],
+                     "PASS" if T1 else "FAIL"))
+            print("  [T2] e 变化 Δ=%.4f                          → %s"
+                  % (info["e_delta"], "PASS" if T2 else "FAIL"))
+            t3txt = ("PASS" if T3 else "FAIL") if mode in ("cat", "cat_het") \
+                else "不适用（k 恒定=设计使然）"
+            print("  [T3] corr(k,1/H) mean=%.4f recalc=%.4f      → %s"
+                  % (info["corr_mean"], info["corr_recalc"], t3txt))
+            print("       k末 mean=%.4f std=%.4f  H=[%s,%s]"
+                  % (info["k_last_mean"], info["k_last_std"],
+                     info["H_min"], info["H_max"]))
+            # const/lrx 的 k 恒定是【设计使然】（消融「等效 lr」），T3 不适用
+            need = ("T1", "T2", "T3") if mode in ("cat", "cat_het") else ("T1", "T2")
+            print("  [门槛] 本档需过 %s（const/lrx 的 k 恒定不算失败）" % (need,))
+            results[t] = dict(T1=T1, T2=T2, T3=T3, need=need, info=info)
+
+    UNIT_MODES = ("cat", "cat_het", "const", "lrx")
+    cats = [t for t in tags
+            if L(t).get("enz_rate_mode") in UNIT_MODES and "freeze" not in t]
+    offs = [t for t in tags if L(t).get("enz_rate_mode") == "off"]
+    idents = [t for t in tags if t not in cats and t not in offs]
+    units_ok = all(all(results[t][k] for k in results[t]["need"])
+                   for t in cats) if cats else False
+    off_ok = all(results[t]["off_ok"] for t in offs) if offs else True
+    sent_ok = all(results[t]["sentinel"] is not False for t in offs) if offs else True
+    ident_ok = all(results[t].get("identity_ok", False) for t in idents)
+    smoke_ok = units_ok and off_ok and sent_ok and ident_ok and bool(cats) and bool(offs)
+
+    print("\n" + "=" * 78)
+    print("[汇总] cats=%s  offs=%s" % (cats, offs))
+    print("  T1/T2/T3 全过=%s  off 零污染=%s  哨兵=%s" % (units_ok, off_ok, sent_ok))
+    print("SMOKE_OK=%d   （0 → 别起 300 步 / 3000 步，贴本日志给我）" % int(smoke_ok))
+    print("=" * 78)
+    raise SystemExit(0 if smoke_ok else 1)
+
+
+if __name__ == "__main__":
+    main()

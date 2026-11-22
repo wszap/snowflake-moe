@@ -1,0 +1,91 @@
+#!/bin/bash
+# step29 V1.004 实验：酶 = per-cell 参数更新速率常数
+# 三关参数化，档位 tag 带后缀，互不覆盖；无 set -e ⇒ 末尾用假完成检测兜住。
+set -uo pipefail
+
+cd "$(dirname "$0")" || exit 1
+
+D=data_25mb.txt
+if [ ! -f "$D" ]; then echo "缺 $D → 停"; exit 1; fi
+
+FULL=${FULL:-0}
+SHORT=${SHORT:-0}
+SEED=${SEED:-0}
+
+if   [ "$FULL"  = "1" ]; then STEPS=3000; SUFFIX="";        SPLIT=1500
+elif [ "$SHORT" = "1" ]; then STEPS=300;  SUFFIX="_s300";    SPLIT=150
+else                          STEPS=20;   SUFFIX="_s20";     SPLIT=1500
+fi
+# 20 步不触发分裂（split_at 放在末尾之外），300 步在 150 触发一次分裂链
+LR=3e-4
+BASE="--data $D --d 256 --h 128 --L 4 --n-cells 4 --variant shared --rank 4 \
+--temp 5.0 --bs 64 --seq-len 128 --lr $LR --max-steps $STEPS --seed $SEED \
+--split-k 8 --split-at $SPLIT --mode split"
+RES="--cell-type residual --compose-k 16 --h-cell 3 --compose-chunk 1 --clip-mode global"
+
+mkdir -p output/v4
+TAGS=""
+BAD=0
+
+run_one () {
+  local NAME="$1"; shift
+  local TAG="st29_${NAME}${SUFFIX}"
+  TAGS="$TAGS $TAG"
+  echo "########## $NAME  →  $TAG  (steps=$STEPS seed=$SEED) ##########"
+  python3 train_bio.py $BASE "$@" --tag "$TAG" > "${TAG}.log" 2>&1
+  local RC=$?
+  echo "  exit=$RC   log=${TAG}.log"
+  [ "$RC" -ne 0 ] && BAD=$((BAD+1))
+  if [ -f "output/v4/${TAG}.json" ]; then
+    echo "  json=OK"
+  else
+    echo "  json=MISSING"
+    BAD=$((BAD+1))
+  fi
+}
+
+# ---- 第一关（SMOKE）：4 档，只验三条单元测试 + off 零污染哨兵 ----
+if [ "$FULL" != "1" ] && [ "$SHORT" != "1" ]; then
+  run_one A0_B  --cell-type B --enz-rate-mode off --zero-check
+  run_one cat   $RES --enz-rate-mode cat
+  run_one const $RES --enz-rate-mode const
+  run_one lrx   $RES --enz-rate-mode lrx
+
+# ---- 第二关（SHORT=1）：6 档，300 步验 κ / T / 与等效 lr 可分 ----
+elif [ "$SHORT" = "1" ]; then
+  run_one A0_B      --cell-type B --enz-rate-mode off --zero-check
+  run_one A1_res    $RES --enz-rate-mode off
+  run_one amp_old   $RES --bio-on --enz-rate-mode amp
+  run_one cat       $RES --enz-rate-mode cat
+  run_one cat_het   $RES --enz-rate-mode cat_het
+  run_one const     $RES --enz-rate-mode const
+  run_one lrx       $RES --enz-rate-mode lrx
+
+# ---- 第三关（FULL=1）：8 档 3000 步，正式判据 ----
+else
+  run_one A0_B      --cell-type B --enz-rate-mode off --zero-check
+  run_one A1_res    $RES --enz-rate-mode off
+  run_one amp_old   $RES --bio-on --enz-rate-mode amp
+  run_one cat       $RES --enz-rate-mode cat
+  run_one cat_het   $RES --enz-rate-mode cat_het
+  run_one const     $RES --enz-rate-mode const
+  run_one lrx       $RES --enz-rate-mode lrx
+  run_one cat_freeze $RES --enz-rate-mode cat --enz-freeze-cell 0
+fi
+
+echo "$TAGS" | tr ' ' '\n' | sed '/^$/d' > step29_tags.txt
+echo "  tags → step29_tags.txt : $TAGS"
+
+echo "########## 第一关判据（只验静态/公式，不验收益）##########"
+SMOKE_RC=0
+python3 step29_smoke.py $TAGS 2>&1 | tee step29_smoke${SUFFIX}.log
+SMOKE_RC=${PIPESTATUS[0]}
+echo "  SMOKE_RC=$SMOKE_RC"
+
+echo "########## 完成标记 ##########"
+if [ "$BAD" -eq 0 ] && [ "$SMOKE_RC" -eq 0 ]; then
+  echo "STEP29_DONE_OK   bad=$BAD  smoke=$SMOKE_RC  tags=$TAGS"
+else
+  echo "STEP29_DONE_FAIL bad=$BAD  smoke=$SMOKE_RC  tags=$TAGS"
+fi
+exit 0

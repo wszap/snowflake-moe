@@ -1,0 +1,246 @@
+# -*- coding: utf-8 -*-
+"""step29 第三关判据：评分表从「固定步数终态 val」换成 τ / T_ε / 双线成本。
+
+纯标准库，只读 json，不跑训练。判读口径跑之前写死，不许事后挑数。
+
+  [0] 零污染硬前置（停线）：A0_B 与 st25_s0_B 301 点 loss/eff 全 0、Δval=0、
+      off 档 enz_rate_trace 空、参数量对账。不过 ⇒ 回滚 *.bak_step29，别往下读。
+  [1] 三条单元测试：T1 f 动态 / T2 e 变化 / T3 corr(k,1/H)
+  [2] 主判据  T_ε：固定【绝对】loss 阈值（默认 1.30，env STEP29_THR 可改）的
+      插值到达步数。★ 不用「各档末态×系数」——那会像 v7 那样测成第一步瞬态。
+  [3] 渐近收敛率：step≥1000 段 log(loss−floor) 线性拟合的 −slope
+  [4] 承重对照：cat vs const / lrx（排除「只是等效调大 lr」）、vs amp_old
+  [5] κ_eff 代理：spread(k·H) 应小于 spread(H)（酶压缩了局部曲率离散度）
+  [6] 双线成本：到 T_ε 的总算力 ∝ T + 累计酶成本
+  [7] 速率 rescue：cat_freeze（单 cell k≡1）与 cat 的差
+
+  ★ 单 seed：所有差值只作方向，不叫显著；终态 val 降级为「不劣于」门禁。
+  ★ 永远不写「加速」：真 wall-clock / avg_step 三档对比不在本判据内。
+"""
+import json
+import math
+import os
+import statistics
+import sys
+
+V4 = os.environ.get("V4DIR", "output/v4")
+THR = float(os.environ.get("STEP29_THR", "1.30"))
+REF = os.environ.get("STEP29_REF", "st25_s0_B")
+
+
+def L(tag):
+    p = os.path.join(V4, tag + ".json")
+    if not os.path.exists(p):
+        return None
+    return json.load(open(p, encoding="utf-8"))
+
+
+def reach(hist, thr):
+    for i in range(1, len(hist)):
+        a, b = hist[i - 1], hist[i]
+        if b["loss"] <= thr:
+            if a["loss"] <= thr:
+                return float(a["step"])
+            f = (a["loss"] - thr) / max(a["loss"] - b["loss"], 1e-12)
+            return float(a["step"]) + f * (b["step"] - a["step"])
+    return None
+
+
+def asym_slope(hist, floor):
+    """长尾 log(Φ−floor) 线性拟合；返回 −slope（越大越快）。"""
+    pts = [(h["step"], h["loss"] - floor) for h in hist
+           if h["step"] >= 1000 and h["loss"] - floor > 1e-9]
+    if len(pts) < 8:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [math.log(p[1]) for p in pts]
+    mx, my = statistics.mean(xs), statistics.mean(ys)
+    vx = sum((x - mx) ** 2 for x in xs)
+    if vx <= 0:
+        return None
+    return -sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / vx
+
+
+def spread(v):
+    v = [x for x in v if x is not None and math.isfinite(x)]
+    if len(v) < 2:
+        return 0.0, 0.0, 0.0
+    return min(v), max(v), (max(v) / max(min(v), 1e-12))
+
+
+def mean(v):
+    q = [x for x in v if x is not None and math.isfinite(x)]
+    return statistics.mean(q) if q else float("nan")
+
+
+def main():
+    tags = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not tags:
+        p = "step29_tags.txt"
+        if os.path.exists(p):
+            tags = open(p, encoding="utf-8").read().split()
+        else:
+            tags = ["st29_A0_B", "st29_A1_res", "st29_amp_old", "st29_cat",
+                    "st29_cat_het", "st29_const", "st29_lrx", "st29_cat_freeze"]
+    D = {t: L(t) for t in tags}
+    missing = [t for t, d in D.items() if d is None]
+    print("=" * 84)
+    print("step29 判据：酶=速率常数 / 主指标 T_ε·渐近率·双线成本（终态 val 只作门禁）")
+    print("V4DIR=%s  THR=%.4f  REF=%s  档数=%d" % (V4, THR, REF, len(D)))
+    if missing:
+        print("  缺档：%s（不是「还没跑完」，是这些档没落盘；不猜）" % missing)
+    print("=" * 84)
+
+    # ---------------- [0] 硬前置 ----------------
+    A0 = next((D[t] for t in D if "A0_B" in t), None)
+    R = L(REF)
+    hard = False
+    print("\n[0] 零污染硬前置（停线）")
+    if A0 is None or R is None:
+        print("  缺 A0_B 或 %s → FAIL" % REF)
+    else:
+        ha = {h["step"]: h for h in R["history"]}
+        hb = {h["step"]: h for h in A0["history"]}
+        cs = sorted(set(ha) & set(hb))
+        dl = max(abs(ha[s]["loss"] - hb[s]["loss"]) for s in cs) if cs else 9
+        de = max(abs((ha[s].get("eff") or 0) - (hb[s].get("eff") or 0))
+                 for s in cs) if cs else 9
+        dv = A0["val_loss"] - R["val_loss"]
+        tr = len(A0.get("enz_rate_trace", []))
+        p0, p1 = A0.get("params_start"), A0.get("params_end")
+        print("  对齐点=%d  loss max|Δ|=%.3e  eff max|Δ|=%.3e  Δval=%+.3e"
+              % (len(cs), dl, de, dv))
+        print("  off 档 enz_rate_trace 长度=%d（应为 0）  params %s→%s"
+              % (tr, p0, p1))
+        hard = (dl == 0.0 and de == 0.0 and dv == 0.0 and tr == 0)
+        print("  → %s" % ("PASS → 地基干净，可往下读" if hard
+                         else "FAIL → 回滚 *.bak_step29，停线"))
+
+    # ---------------- [1] 三条单元测试 ----------------
+    print("\n[1] 三条单元测试（T3 只要求 cat / cat_het）")
+    units = {}
+    for t, d in D.items():
+        m = d.get("enz_rate_mode", "off")
+        if m not in ("cat", "cat_het", "const", "lrx") or "freeze" in t:
+            continue
+        s = d.get("enz_rate_summary") or {}
+        tr = d.get("enz_rate_trace", [])
+        f_all = [v for q in tr for v in q.get("f", [])]
+        T1 = (statistics.pstdev(f_all) > 0.05 if f_all else False) and \
+             (0.05 < statistics.median(f_all) < 0.95 if f_all else False)
+        T2 = s.get("e_delta_mean", 0) > 0.10
+        T3 = s.get("corr_k_invH_mean", 0) > 0.5
+        need = ("T1", "T2", "T3") if m in ("cat", "cat_het") else ("T1", "T2")
+        ok = all({"T1": T1, "T2": T2, "T3": T3}[k] for k in need)
+        units[t] = ok
+        print("  %-22s f_std=%.3f eΔ=%.3f corr=%.3f  需过%s → %s"
+              % (t, statistics.pstdev(f_all) if f_all else 0,
+                 s.get("e_delta_mean", 0), s.get("corr_k_invH_mean", 0),
+                 need, "PASS" if ok else "FAIL"))
+
+    # ---------------- [2] 主判据 ----------------
+    floors = [min(h["loss"] for h in d["history"]) for d in D.values() if d]
+    floor = min(floors) - 1e-4 if floors else 0.0
+    print("\n[2] 主判据（阈值固定绝对 loss=%.4f；floor=%.6f 供渐近率）" % (THR, floor))
+    T, SLP, COST = {}, {}, {}
+    print("  %-24s %10s %12s %10s" % ("tag", "T_ε", "渐近率", "终态门禁"))
+    for t, d in D.items():
+        h = d["history"]
+        T[t] = reach(h, THR)
+        SLP[t] = asym_slope(h, floor)
+        tr = d.get("enz_rate_trace", [])
+        if T[t] is not None and tr:
+            i = min(int(T[t]), len(tr) - 1)
+            COST[t] = tr[i].get("cost_sum", 0.0)
+        else:
+            COST[t] = 0.0
+        gate = "PASS" if d["val_loss"] <= (A0["val_loss"] * 1.05
+                                           if A0 else 9e9) else "FAIL"
+        print("  %-24s %10s %12s %10s"
+              % (t, "None" if T[t] is None else "%.1f" % T[t],
+                 "None" if SLP[t] is None else "%.5f" % SLP[t], gate))
+
+    def pair(a, b):
+        if a is None or b is None:
+            return float("nan")
+        return a - b
+
+    def find(suffix):
+        key = "st29_" + suffix
+        exact = [t for t in D if t == key]
+        if exact:
+            return exact[0]
+        # 兼容第一/二关的 _s20 / _s300 后缀（不误匹配 cat_het / cat_freeze）
+        alt = [t for t in D if t.startswith(key + "_s")]
+        return alt[0] if alt else None
+
+    c = find("cat")
+    co = find("const")
+    lx = find("lrx")
+    am = find("amp_old")
+    rs = find("A1_res")
+    fr = find("cat_freeze")
+    ht = find("cat_het")
+
+    print("\n[3] 承重对照（负=更早；cat 必须同时赢过两个等效 lr 对照）")
+    for nm, ref in [("cat−A1_res", rs), ("cat−const", co),
+                    ("cat−lrx", lx), ("cat−amp_old", am)]:
+        x = T.get(c) if c else None
+        y = T.get(ref) if ref else None
+        dv = pair(x, y)
+        print("  %-14s = %s   (%s vs %s)"
+              % (nm, "%+8.1f" % dv if dv == dv else "     n/a", c, ref))
+    p3 = (c is not None and co and lx
+          and T.get(c) is not None
+          and T.get(c) < 0.8 * mean([T.get(co), T.get(lx)])
+          and pair(T.get(c), T.get(co)) < -10
+          and pair(T.get(c), T.get(lx)) < -10)
+    print("  → 与等效 lr 严格可分: %s" % ("PASS" if p3 else "FAIL"))
+
+    print("\n[4] κ_eff 代理：spread(k·H) 应小于 spread(H)（酶压平局部曲率）")
+    for t in (c, ht, co, lx):
+        if not t or not D[t]:
+            continue
+        tr = D[t].get("enz_rate_trace", [])
+        if not tr:
+            continue
+        q = tr[-1]
+        H, k = q.get("H", []), q.get("k", [])
+        kH = [a * b for a, b in zip(k, H)]
+        _, _, rH = spread(H)
+        _, _, rkH = spread(kH)
+        print("  %-22s κ(H)=%8.2f  κ(k·H)=%8.2f  比=%.3f"
+              % (t, rH, rkH, rkH / max(rH, 1e-12)))
+    p4 = True  # 描述性；真模型没有精确块对角 Hessian，不设硬阈值（避免挑数）
+
+    print("\n[5] 双线成本（到 T_ε 的总算力 ∝ T + 累计酶成本；基线=A1_res）")
+    base = (T[rs] + COST[rs]) if (rs and T.get(rs) is not None) else None
+    for t in D:
+        if T[t] is None:
+            print("  %-24s T_ε=None（未达阈值，不计成本）" % t)
+            continue
+        tot = T[t] + COST[t]
+        print("  %-24s T=%8.1f  cost=%8.2f  total=%8.1f  %s"
+              % (t, T[t], COST[t], tot,
+                 "" if base is None else "相对基线=%.3f×" % (tot / max(base, 1e-9))))
+
+    print("\n[6] 速率 rescue（cat_freeze：单 cell k≡1，不删专家、不改前向）")
+    if fr and c:
+        print("  cat T_ε=%s   freeze T_ε=%s   Δ=%+.1f"
+              % (T.get(c), T.get(fr), pair(T.get(fr), T.get(c))))
+        print("  （freeze 变慢 = 该 cell 的酶确实在贡献速率；仅描述，不设阈值）")
+    else:
+        print("  未跑 freeze 档（第三关才有）")
+
+    print("\n【判读 · 预先写死】")
+    print("  [0] 不过 → 回滚 *.bak_step29，停线，别读下面任何一行")
+    print("  [1] 任一 cat 档不过 → 酶根本没上场，结论只能写『实验未测到』")
+    print("  [3] PASS 且 T_ε(cat) 明显更小 → 速率常数型酶在拼专家里成立")
+    print("  [3] FAIL / T_ε 打平 → 与等效 lr 不可分，如实收口，不调 β/Km 硬凑")
+    print("  单 seed 仅方向，不叫显著；终态 val 只是门禁，不作排序目标")
+    print("  永远不写『加速』：wall-clock / avg_step 三档对比不在本判据内")
+    print("=" * 84)
+
+
+if __name__ == "__main__":
+    main()
