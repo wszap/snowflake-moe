@@ -1,5 +1,14 @@
 # Snowflake MoE v2.0 — Compositional（忆点即连接）
 
+> V1.010 的守恒更新层与科学边界见
+> [`../docs/BIO_UPDATE_FOUNDATIONS.md`](../docs/BIO_UPDATE_FOUNDATIONS.md)。
+> 它只在优化器区室之间搬运参数量加权预算，不改变本页定义的“先拼参数、再做一次非线性前向”。
+
+> 生物/化学边界与“细胞环境”缺项见
+> [`../docs/BIO_CHEM_CELL_ENVIRONMENT_AUDIT.md`](../docs/BIO_CHEM_CELL_ENVIRONMENT_AUDIT.md)；
+> 本机线程、token 缓存和 XPU 状态见
+> [`../docs/PERFORMANCE_LOCAL.md`](../docs/PERFORMANCE_LOCAL.md)。
+
 > **忆点定义（v2.0）**：忆点**就是连接本身**。
 > 器官身份由 `organelle_memory` 决定 → 高斯带通生成 `connect` → 折叠进路由 `wiring`。
 > ⚠️ 与 v1.0 的「独立值槽」是**不同架构下的不同定义**，请勿混用。
@@ -73,6 +82,20 @@ xA = bmm(xc, U1)                                    # 再前向一次
 ---
 
 ## Reproduction
+
+V1.010 / A 路线的矩阵运行守恒、压力驱动和冻结三臂各 5 个种子，
+逐条验证资源轨迹，并自动生成配对统计。当前本地结果：B 基线平均
+`4.563620882`，C 压力驱动平均 `4.563223052`，配对 `C-B=-0.000397830`，
+95% CI `[-0.00117742, +0.00038176]`，3 胜 2 负，结论为 **inconclusive**；
+D 冻结对照与 B 的 gap 为 0。
+
+```bash
+bash run_step34_A.sh
+
+# 已有结果可单独复核；95% 配对区间跨 0 时结论固定为 inconclusive
+python3 analyze_step34_A.py --outdir output/v4 --prefix st34 \
+    --write output/v4/st34_A_summary.json
+```
 
 ```bash
 # 摸底

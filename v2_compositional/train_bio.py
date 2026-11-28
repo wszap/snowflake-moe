@@ -57,7 +57,9 @@ from paperplane_moe import (
 from paperplane_moe.telemetry import validate_events, CORE_EVENT_KINDS
 from paperplane_moe.enzymology import Enzymology, ENZ_EVENT_KINDS
 from paperplane_moe.enzyme_rate import EnzymeRateController   # V1.004
-from train_v3 import load_data, evaluate
+from bio_update import BioUpdate
+from train_v3 import (load_data, evaluate, resolve_device,
+                      configure_runtime)
 from train_compose import all_cells, make_clip, do_split_v10, _make_v10_cls
 from train_split import do_split as do_split_B
 from organelle_registry import OrganelleRegistry
@@ -187,13 +189,44 @@ def main():
                          "backbone=V1.005：k_i 落 16 份主干 lr")
     ap.add_argument("--enz-warmup", type=int, default=1,
                     help="诱导延迟步数：前 N 步严格 k=1（Jacob-Monod 转录延迟）")
+    # ---- V1.010：参数量归一的守恒资源分配（不改拼专家前向）----
+    ap.add_argument("--bio-update", choices=["off", "on"], default="off",
+                    help="on=在 shared+每个 compose cell 间守恒搬运更新预算")
+    ap.add_argument("--bio-c-weight", type=float, default=0.0,
+                    help="组间相对优化压力的实验权重；0 是严格基线")
+    ap.add_argument("--bio-use-C", action="store_true",
+                    help="兼容旧试验名；等价于 --bio-c-weight 1（若未显式设置）")
+    ap.add_argument("--bio-trust", type=float, default=4.0,
+                    help="相对基线学习率上限，必须 >=1；1 是冻结分配对照")
+    ap.add_argument("--bio-tau-e", type=float, default=100.0,
+                    help="每组梯度 RMS 的慢 EMA 时间常数")
+    ap.add_argument("--bio-kappa", type=float, default=0.30,
+                    help="资源份额回到参数量基线的对数回复强度")
+    ap.add_argument("--bio-eta-phi", type=float, default=0.05,
+                    help="负熵镜像下降步长，只作用于资源份额 phi")
+    ap.add_argument("--bio-trace-flush-every", type=int, default=10,
+                    help="phi JSONL 的刷新间隔；每一步仍写一行")
+    ap.add_argument("--bio-require-active", action="store_true",
+                    help="要求组间相对尺度确实分化，否则以 rc=7 失败")
+    ap.add_argument("--bio-min-scale-std", type=float, default=0.005,
+                    help="G-PHI 作用面硬闸的最小加权相对尺度标准差")
+    # ---- 本地运行时：不改变默认实验语义 ----
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda", "xpu"],
+                    default="auto")
+    ap.add_argument("--cpu-threads", type=int, default=0,
+                    help="CPU intra-op threads；本机小模型实测 2 最快")
+    ap.add_argument("--interop-threads", type=int, default=0,
+                    help="CPU inter-op threads；0 保持 PyTorch 默认")
+    ap.add_argument("--token-cache", default="",
+                    help="token 缓存路径，或 auto=DATA.tokens.pt")
+    ap.add_argument("--eval-batches", type=int, default=20)
+    ap.add_argument("--no-bf16", dest="bf16", action="store_false",
+                    default=True)
     a = ap.parse_args()
 
-    torch.manual_seed(a.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(a.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    bf16 = (device == "cuda")
+    device = resolve_device(a.device)
+    configure_runtime(device, a.seed, a.cpu_threads, a.interop_threads)
+    bf16 = a.bf16 and device.type in ("cuda", "xpu")
     tag = a.tag or ("bio_s%d_%s" % (a.seed, a.cell_type))
     cfg = cfg_from_args(a)
 
@@ -216,7 +249,8 @@ def main():
         if isinstance(_m, torch.nn.Module):
             _m.to(device)
 
-    get_batch, vocab = load_data(a.data, a.seq_len, a.bs, False)
+    get_batch, vocab = load_data(
+        a.data, a.seq_len, a.bs, False, a.token_cache)
     n0, K = a.n, a.split_k
     model = build_bio(a, cfg, vocab, n0, device)
     cells = all_cells(model)
@@ -277,6 +311,9 @@ def main():
     #   lrx 故意不分组（它要的就是「不分组的等效 lr」对照）。
     if rate is not None and a.enz_rate_mode != "lrx":
         rate.rebind_groups(opt, cells, a.lr)
+    bio_trace_path = os.path.join(a.outdir, "%s_bio.jsonl" % tag)
+    bio_update = BioUpdate.from_args(
+        a, opt, model, cells, a.lr, trace_path=bio_trace_path)
     clip, refresh_clip = make_clip(model, a.clip_mode)
 
     model.train()
@@ -336,6 +373,9 @@ def main():
             #   否则分裂后 1500 步的 k 全部失效（v9 的「测量点」教训）。
             if rate is not None and a.enz_rate_mode != "lrx":
                 rate.rebind_groups(opt, cells, lr)
+            if bio_update is not None:
+                # split 重建 optimizer；按 shared+cell 重新分组并按稳定组名续接 phi。
+                bio_update.rebind(opt, model, cells, lr)
             if rate is not None:
                 rate.on_divide(step, busy)   # duplication + 谱系，全自主
             events.append(dict(step=step, event="divide", K=K,
@@ -397,7 +437,7 @@ def main():
                             c.temp_delta_w = torch.zeros_like(c.temp_delta_w)
 
         # ---- 前向 / 反向（与 train_compose 逐位同路径）----
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
             logits, diag = model(x)
         loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)),
                                y.view(-1))
@@ -413,6 +453,11 @@ def main():
         # 乘 .grad 会被 Adam 的 m̂/√v̂ 洗掉，所以不乘 grad。
         if rate is not None:
             rate.observe_step(cells, opt, lr, step)
+        bio_snapshot = None
+        if bio_update is not None:
+            bio_update.observe(float(loss.item()))
+            bio_snapshot = bio_update.step(lr)
+            bio_update.write_trace(step, bio_snapshot)
         opt.step()
         # ---- V1.003：底物 = 各专家 slot 本步真实前向统计量 ----
         # 叶绿体转底物 / 线粒体给 ATP / 血液两类忆点汇合 / 产物抑制负反馈
@@ -469,6 +514,12 @@ def main():
                         S_spread=_t["S_spread"], e_mean=_t["e_mean"],
                         H_min=_t["H_min"], H_max=_t["H_max"],
                         corr_k_invH=_t["corr_k_invH"])
+                if bio_snapshot is not None:
+                    hist[-1].update(
+                        phi_sum=bio_snapshot.sum_phi,
+                        phi_scale_std=bio_snapshot.scale_std,
+                        phi_budget_gap=bio_snapshot.budget_gap,
+                        phi_G=len(bio_update.keys))
             except Exception:
                 hist[-1].update(gate_comp=-9.0, comp_norm=-9.0, ci_mean=-9.0)
             if step % 500 == 0:
@@ -507,7 +558,7 @@ def main():
             # 规格 7：训练期复制被禁止，写一条「禁止」记录（不假装发生）
             tel.on_clone(step, 0, True)
 
-    val = evaluate(model, get_batch, 20, device, bf16)
+    val = evaluate(model, get_batch, a.eval_batches, device, bf16)
     params1 = sum(p.numel() for p in model.parameters())
     eff_last = next((h["eff"] for h in reversed(hist) if h["eff"] is not None), None)
     vn_last = next((h["var_norm"] for h in reversed(hist)
@@ -561,12 +612,29 @@ def main():
         enz_rate_trace=(rate.trace if rate is not None else []),
         enz_rate_lineage=(rate.lineage if rate is not None else []),
         enz_rate_summary=(rate.summary() if rate is not None else None),
+        bio_update_summary=(bio_update.summary() if bio_update is not None else None),
+        bio_trace=(bio_trace_path if bio_update is not None else None),
+        runtime=dict(device=str(device), bf16=bool(bf16),
+                     cpu_threads=torch.get_num_threads(),
+                     interop_threads=torch.get_num_interop_threads(),
+                     token_cache=(a.token_cache or None)),
     )
     os.makedirs(a.outdir, exist_ok=True)
     out = os.path.join(a.outdir, "%s.json" % tag)
     json.dump(rec, open(out, "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
     print("[saved] %s" % out)
+
+    if bio_update is not None:
+        bio_update.close()
+        if a.bio_require_active:
+            try:
+                bio_update.require_active(a.bio_min_scale_std)
+                print("[G-PHI] PASS max_scale_std=%.6g" %
+                      bio_update.summary()["max_scale_std"])
+            except RuntimeError as exc:
+                print("[G-PHI] MECHANISM_NOT_ACTIVE: %s" % exc, file=sys.stderr)
+                raise SystemExit(7)
 
     # ---- 零污染自检（规格 12 红线 / 改名 B 的硬前置）----
     if a.zero_check:

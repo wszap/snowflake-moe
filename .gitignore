@@ -3,5 +3,8 @@ data/
 *.log
 __pycache__/
 .pytest_cache/
+.codex-run-deps/
+.codex-run-output/
 *.pt
 *.tmp
+*.tokens.pt

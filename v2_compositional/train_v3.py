@@ -48,18 +48,92 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scaffold_v3 import SnowflakeLMV3, leak_check   # noqa: E402
 
 
+def resolve_device(requested="auto"):
+    """Resolve an explicit device without silently falling back."""
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return torch.device("xpu")
+        return torch.device("cpu")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested, but CUDA is unavailable")
+    if requested == "xpu" and not (
+            hasattr(torch, "xpu") and torch.xpu.is_available()):
+        raise RuntimeError("--device xpu requested, but this PyTorch build has no usable XPU")
+    return torch.device(requested)
+
+
+def configure_runtime(device, seed, cpu_threads=0, interop_threads=0):
+    """Configure deterministic seeding and opt-in CPU thread limits."""
+    if device.type == "cpu":
+        if cpu_threads > 0:
+            torch.set_num_threads(cpu_threads)
+        if interop_threads > 0:
+            try:
+                torch.set_num_interop_threads(interop_threads)
+            except RuntimeError:
+                pass  # may only be set before the first parallel operation
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(seed)
+    elif device.type == "xpu" and hasattr(torch.xpu, "manual_seed"):
+        torch.xpu.manual_seed(seed)
+
+
 # ============================================================================
 # 数据加载（含空数据防线 ①）
 # ============================================================================
-def load_data(path, seq_len, bs, fix_mojibake=False):
-    """字符级加载。★ 写完立刻 assert，源文件缺失/为空时直接崩。"""
+def _token_cache_path(path, cache_path):
+    if not cache_path:
+        return None
+    return path + ".tokens.pt" if cache_path == "auto" else cache_path
+
+
+def load_data(path, seq_len, bs, fix_mojibake=False, cache_path=None):
+    """字符级加载；可选安全的本地 token 缓存，且不改变采样 RNG。"""
     if not os.path.exists(path):
         raise FileNotFoundError(f"数据文件不存在: {path}")
 
-    raw = open(path, "rb").read()
-    txt = raw.decode("utf-8", errors="ignore")
+    stat = os.stat(path)
+    cache_path = _token_cache_path(path, cache_path)
+    fingerprint = {
+        "source_path": os.path.abspath(path),
+        "source_size": int(stat.st_size),
+        "source_mtime_ns": int(stat.st_mtime_ns),
+        "fix_mojibake": bool(fix_mojibake),
+        "format": 1,
+    }
+    payload = None
+    if cache_path and os.path.exists(cache_path):
+        try:
+            try:
+                candidate = torch.load(cache_path, map_location="cpu",
+                                       weights_only=True)
+            except TypeError:  # PyTorch < 2.0
+                candidate = torch.load(cache_path, map_location="cpu")
+            cached_ids = candidate.get("ids")
+            cached_vocab = candidate.get("vocab_size")
+            valid_payload = (
+                candidate.get("fingerprint") == fingerprint
+                and isinstance(cached_ids, torch.Tensor)
+                and cached_ids.ndim == 1
+                and cached_ids.numel() > 0
+                and isinstance(cached_vocab, int)
+                and cached_vocab > 0
+            )
+            if valid_payload:
+                payload = candidate
+                print(f"[data-cache] hit {cache_path}", flush=True)
+        except (OSError, RuntimeError, ValueError, TypeError, EOFError,
+                AttributeError, KeyError) as exc:
+            print(f"[data-cache] ignore invalid cache: {exc}", flush=True)
 
-    if fix_mojibake:
+    with open(path, "rb") as source:
+        raw = source.read()
+    txt = None if payload is not None else raw.decode("utf-8", errors="ignore")
+
+    if fix_mojibake and txt is not None:
         try:
             cand = txt.encode("latin-1").decode("utf-8")
             if len(set(cand)) < len(set(txt)):
@@ -72,10 +146,24 @@ def load_data(path, seq_len, bs, fix_mojibake=False):
     assert n_bytes >= 1_000_000, \
         f"[数据为空或过小] {path} 仅 {n_bytes} 字节。请用魔搭重新生成数据。"
 
-    chars = sorted(set(txt))
-    stoi = {c: i for i, c in enumerate(chars)}
-    ids = torch.tensor([stoi[c] for c in txt], dtype=torch.long)
-    V = len(chars)
+    if payload is None:
+        chars = sorted(set(txt))
+        stoi = {c: i for i, c in enumerate(chars)}
+        V = len(chars)
+        storage_dtype = (torch.uint8 if V <= 256 else
+                         torch.int16 if V <= 32767 else torch.int32)
+        ids = torch.tensor([stoi[c] for c in txt], dtype=storage_dtype)
+        if cache_path:
+            cache_dir = os.path.dirname(os.path.abspath(cache_path))
+            os.makedirs(cache_dir, exist_ok=True)
+            tmp_path = cache_path + ".tmp"
+            torch.save({"fingerprint": fingerprint, "ids": ids,
+                        "vocab_size": V}, tmp_path)
+            os.replace(tmp_path, cache_path)
+            print(f"[data-cache] wrote {cache_path}", flush=True)
+    else:
+        ids = payload["ids"]
+        V = int(payload["vocab_size"])
 
     n = int(len(ids) * 0.9)
     tr, va = ids[:n], ids[n:]
@@ -87,8 +175,8 @@ def load_data(path, seq_len, bs, fix_mojibake=False):
     def get_batch(split):
         src = tr if split == "train" else va
         ix = torch.randint(len(src) - seq_len - 1, (bs,))
-        x = torch.stack([src[i:i + seq_len] for i in ix])
-        y = torch.stack([src[i + 1:i + 1 + seq_len] for i in ix])
+        x = torch.stack([src[i:i + seq_len] for i in ix]).long()
+        y = torch.stack([src[i + 1:i + 1 + seq_len] for i in ix]).long()
         return x, y
 
     return get_batch, V
@@ -101,7 +189,8 @@ def evaluate(model, get_batch, n_batch, device, bf16):
     for _ in range(n_batch):
         x, y = get_batch("val")
         x, y = x.to(device), y.to(device)
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+        device_type = torch.device(device).type
+        with torch.autocast(device_type, dtype=torch.bfloat16, enabled=bf16):
             logits, _ = model(x)
         loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)),
                                y.view(-1))
@@ -141,13 +230,20 @@ def main():
     ap.add_argument("--no-leak-check", action="store_true")
     ap.add_argument("--save-ckpt", default="")
     ap.add_argument("--outdir", default="output/v3")
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda", "xpu"],
+                    default="auto")
+    ap.add_argument("--cpu-threads", type=int, default=0,
+                    help="CPU intra-op threads; 0 keeps PyTorch default")
+    ap.add_argument("--interop-threads", type=int, default=0,
+                    help="CPU inter-op threads; 0 keeps PyTorch default")
+    ap.add_argument("--token-cache", default="",
+                    help="token cache path, or 'auto' for DATA.tokens.pt")
+    ap.add_argument("--eval-batches", type=int, default=20)
     a = ap.parse_args()
 
-    torch.manual_seed(a.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(a.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    bf16 = a.bf16 and device == "cuda"
+    device = resolve_device(a.device)
+    configure_runtime(device, a.seed, a.cpu_threads, a.interop_threads)
+    bf16 = a.bf16 and device.type in ("cuda", "xpu")
 
     max_steps = a.smoke_steps if a.smoke else a.max_steps
     tag = a.tag or (f"v3_{a.select_mode}_s{a.seed}")
@@ -159,7 +255,8 @@ def main():
     print("=" * 70, flush=True)
 
     # ---- 数据 ----
-    get_batch, vocab_size = load_data(a.data, a.seq_len, a.bs, a.fix_mojibake)
+    get_batch, vocab_size = load_data(
+        a.data, a.seq_len, a.bs, a.fix_mojibake, a.token_cache)
 
     # ---- 模型 ----
     model = SnowflakeLMV3(
@@ -215,7 +312,7 @@ def main():
         x, y = get_batch("train")
         x, y = x.to(device), y.to(device)
 
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
             logits, diag = model(x)
         loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)),
                                y.view(-1))
@@ -252,7 +349,7 @@ def main():
     elapsed = time.time() - t0
 
     # ---- 收尾 ----
-    val_loss = evaluate(model, get_batch, 20, device, bf16)
+    val_loss = evaluate(model, get_batch, a.eval_batches, device, bf16)
 
     def _last(key):
         for h in reversed(hist):

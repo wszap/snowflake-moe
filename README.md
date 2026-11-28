@@ -1,152 +1,82 @@
-# Snowflake MoE
+# Snowflake MoE / paperplaneMoe
 
-A lightweight Sparse Mixture-of-Experts (MoE) language model with compositional experts, memory points, and erasable lifelong learning, built from scratch in PyTorch.
+一个从零实现的组合式 Mixture-of-Experts 研究仓库。当前主线是
+`v2_compositional/`：先组合专家参数，再执行一次非线性前向，并在此基础上研究
+可观测的“细胞/细胞器”类比和守恒的优化资源分配。
 
-## Project Intro
+## 先读：项目的科学边界
 
-Snowflake MoE is a from-scratch implementation of a sparse MoE architecture that combines fine-grained expert routing with a shared-expert "memory point" mechanism, enabling **compositional generalization**, **targeted memory erasure**, and **lifelong learning** in a compact parameter budget.
+本项目当前是**生物启发的机器学习模型**，不是完整细胞模拟器。代码里的
+`bloodstream`、`mitochondria`、`chloroplast`、`enzyme` 等名称，部分只对应旁路
+状态机或优化器类比；它们尚不构成真实代谢网络，也不能同时被解释为一种自然细胞。
 
-## Core Contributions
+- 逐模块审计与缺失环境变量：[`docs/BIO_CHEM_CELL_ENVIRONMENT_AUDIT.md`](docs/BIO_CHEM_CELL_ENVIRONMENT_AUDIT.md)
+- 守恒更新层的数学和文献边界：[`docs/BIO_UPDATE_FOUNDATIONS.md`](docs/BIO_UPDATE_FOUNDATIONS.md)
+- 本机性能测试和推荐配置：[`docs/PERFORMANCE_LOCAL.md`](docs/PERFORMANCE_LOCAL.md)
 
-1. **Compositional MoE (组合 MoE)**: Fine-grained experts + shared experts + sparse activation routing. The router learns to compose reusable expert combinations, achieving strong generalization under a fraction of the parameters of a dense baseline.
-2. **Memory Points (忆点)**: A dedicated memory-value slot mechanism that stores decoupled factual knowledge, separate from routing weights.
-3. **Erasable Memory (可擦除)**: Memory values can be selectively erased at inference time. Erasing 50% of memory slots causes only mild PPL degradation, while erasing 100% degrades the model significantly — demonstrating that knowledge is localized and erasable on demand.
-4. **Lifelong Learning (终身学习)**: New domains can be added with negligible regression on previously learned domains.
+## 快速开始
 
-## Environment Dependencies
-
-- Python 3.10+
-- torch >= 2.1.0 (CUDA recommended)
-- numpy
-- scikit-learn
-- matplotlib
-- scipy
-- datasets
-
-Install with:
+安装依赖：
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-## Reproduction Commands
+Windows 本机 CPU 推荐入口（本机实测 2 个 intra-op 线程最快）：
 
-Main experiments (run from the repository root):
+```powershell
+cd v2_compositional
+.\run_local_cpu.ps1 -Python python -Data data_25mb.txt -Steps 200
+```
+
+等价的跨平台命令：
 
 ```bash
-# TinyStories baseline (CellMoE, ckpt) — PPL ~10.01
-python run_cellmoe_ckpt.py
-
-# TinyStories baseline (CellMoE, MR2, fixed) — PPL ~10.02
-python run_cellmoe_mr2.py
-
-# Memory erasure study (erase 0% / 50% / 100% of memory slots)
-python run_erase_tinystories.py
-python run_erase_mr2.py
-
-# Lifelong learning: TinyStories + Bible, check regression
-python run_lifelong_tinystories.py
-
-# Out-of-distribution generalization (ID vs OOD PPL)
-python run_ood_v2.py
-
-# Stage-wise training pipeline (stages 1-5)
-python run_stage1.py
-python run_stage2.py
-python run_stage3.py
-python run_stage4.py
-python run_stage5.py
-
-# MNIST routing-behavior ablation (fixed / rules / learned)
-python train_mnist.py
-
-# LM scaling & ablation sweep
-python run_lm.py  # via run_experiments.py
+python v2_compositional/train_bio.py \
+  --data v2_compositional/data_25mb.txt \
+  --max-steps 200 --device cpu --cpu-threads 2 \
+  --interop-threads 1 --token-cache auto
 ```
 
-## Checkpoint 保存规范
+`--token-cache auto` 只缓存字符 token，不改变数据划分或随机采样。CUDA/XPU 必须
+显式可用；指定了不可用设备时程序会报错，不会静默换成 CPU。
 
-所有 `run_*.py` 训练脚本统一按以下规范保存模型，**只加保存、不改变训练逻辑**。
+## 仓库地图
 
-**保存位置**：仓库根目录 `checkpoints/`（该目录已被 `.gitignore` 排除，模型文件**不会** push 到 GitHub，只保留本地；代码与 CSV 正常提交）。
-
-**命名规则**：`checkpoints/{实验名}_{seed}.pt`，seed 取脚本内 `SEED` 常量（默认 2026）。
-
-| 脚本 | 保存内容 | 命名 |
+| 路径 | 状态 | 内容 |
 |---|---|---|
-| `run_cellmoe_ckpt.py` | 每个 epoch 结束保存一次，最终 epoch 覆盖为最终版 | `cellmoe_tinystories_epoch{N}.pt` / `cellmoe_tinystories.pt` |
-| `run_cellmoe_v2.py` | 最终模型 | `cellmoe_v2_{seed}.pt` |
-| `run_cellmoe_mr2.py` | 最终模型 | `cellmoe_mr2_{seed}.pt` |
-| `run_stage1.py` | 最终模型 | `improved_v3_{seed}.pt` |
-| `run_stage2.py` | 最终模型 | `stage2_{seed}.pt` |
-| `run_stage3.py` | 持续学习后模型 | `improved_v3_lifelong_{seed}.pt` |
-| `run_stage4.py` | 免疫组 A / 对照组 B | `stage4_immune_{seed}.pt` / `stage4_control_{seed}.pt` |
-| `run_stage5.py` | CellMoE / Fixed 最终模型 | `stage5_cellmoe_{seed}.pt` / `stage5_fixed_{seed}.pt` |
-| `run_stage5_fast.py` | 最终模型 | `stage5_fast_{seed}.pt` |
-| `run_stage5_fixed.py` | 最终模型 | `stage5_fixed_{seed}.pt` |
-| `run_lifelong.py` | 持续学习后模型 | `v3_lifelong_{seed}.pt` |
-| `run_lifelong_tinystories.py` | 持续学习后模型 | `cellmoe_lifelong_{seed}.pt` |
-| `run_ood.py` | CellMoE / Fixed 最终模型 | `ood_cellmoe_{seed}.pt` / `ood_fixed_{seed}.pt` |
-| `run_ood_v2.py` | CellMoE / Fixed 最终模型 | `ood_v2_cellmoe_{seed}.pt` / `ood_v2_fixed_{seed}.pt` |
-| `run_erase.py` | 100% 擦除并恢复后模型 | `erase_{seed}.pt` |
-| `run_erase_mr2.py` | 擦除后模型（50%/100% 覆盖保存） | `erase_mr2_{seed}.pt` |
-| `run_erase_tinystories.py` | 擦除后模型（50%/100% 覆盖保存） | `erase_tinystories_{seed}.pt` |
-| `run_experiments.py` | 每个 (seed, mode) 组合最终模型 | `experiments_{mode}_{seed}.pt` |
+| `v2_compositional/` | 当前研究主线 | 组合专家、V3/V4、BioUpdate、实验脚本 |
+| `v2_compositional/paperplane_moe/` | 核心包 | 生物学类比原语、遥测、细胞环境契约 |
+| `v2_compositional/tests/` | 自动验证 | 守恒数学、环境完整性、缓存等价性 |
+| `docs/` | 文档中心 | 架构、协议、审计、负结果、性能 |
+| 根目录 `run_*.py` | v1/历史实验 | 词级 CellMoE、擦除、终身学习、OOD |
+| `README_v1_memory_points.md` | 历史定义 | v1 独立值槽“忆点” |
+| `README_v2_main.md` | v2 概览 | v2 连接式“忆点”与结果摘要 |
 
-保存内容统一为 `torch.save` 的 dict：`state_dict` + 训练配置（`cfg`/`config`）+ 关键指标（如 `final_ppl`），便于后续加载复现。
+完整文档索引见 [`docs/README.md`](docs/README.md)。旧文件暂不移动，避免破坏实验
+脚本和结果 JSON 中已经记录的路径；整理采用“索引 + 明确版本边界”的方式。
 
-## Core Results
+## 可复现实验
 
-### PPL Comparison (TinyStories, 5 epochs)
+V1.010 的 A 路线包含守恒基线、压力驱动和冻结对照三臂：
 
-| Model | Params | val_ce | val_ppl | Note |
-|---|---|---|---|---|
-| CellMoE (ckpt run) | 1,823,077 | 2.3042 | **10.0157** | baseline |
-| CellMoE (MR2 fixed) | 1,823,077 | 2.3043 | **10.0169** | fixed run |
-
-### Memory Erasure (TinyStories)
-
-| Erase Fraction | val_ce | val_ppl |
-|---|---|---|
-| 0% (baseline) | 2.3041 | 10.0148 |
-| 50% (256 slots) | 2.3151 | 10.1261 |
-| 100% (512 slots) | 2.8973 | 18.1251 |
-
-### Lifelong Learning (TinyStories + Bible)
-
-| Stage | ts_base_ppl | ts_life_ppl | regression | bible_base_ppl | bible_life_ppl |
-|---|---|---|---|---|---|
-| lifelong | 10.0148 | 10.0246 | +0.0098 | 19.4129 | 18.2200 |
-
-### OOD Generalization (Shakespeare → OOD)
-
-| Model | id_ppl | ood_ppl | ood/id ratio |
-|---|---|---|---|
-| CellMoE v3 | 15.0317 | 13.9253 | 0.9264 |
-| Fixed MoE | 26.5113 | 18.1065 | 0.6830 |
-
-### Parameter Efficiency (Snowflake v3, Shakespeare)
-
-| Mode | Active Params | Fixed Params | Param Ratio | val_ppl (3 seeds) |
-|---|---|---|---|---|
-| snowflake_v3 | 203,713 | 259,009 | 0.7865 | 13.33–14.39 |
-
-## BibTeX
-
-```bibtex
-@software{snowflake_moe,
-  author = {Wu, Shangzhen},
-  title = {Snowflake MoE: Compositional Sparse MoE with Erasable Lifelong Memory},
-  year = {2026},
-  url = {https://github.com/wszap/snowflake-moe},
-  license = {Apache-2.0}
-}
+```bash
+cd v2_compositional
+bash run_step34_A.sh
+python analyze_step34_A.py --outdir output/v4 --prefix st34 \
+  --write output/v4/st34_A_summary.json
 ```
 
-## Author
+当前本地 5-seed 配对结果的 95% 区间跨 0，因此压力项相对基线应标记为
+`inconclusive`，不能写成已证明提升。详见
+[`v2_compositional/README.md`](v2_compositional/README.md)。
 
-**Wu Shangzhen** (Independent Researcher)
+## 测试
 
-## License
+```bash
+python -m unittest discover -s v2_compositional/tests -p "test_*.py" -v
+```
 
-Apache License 2.0. See [LICENSE](LICENSE).
+## 许可证与作者
+
+Apache-2.0，见 [`LICENSE`](LICENSE)。作者：Wu Shangzhen（Independent Researcher）。

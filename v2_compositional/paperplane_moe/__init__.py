@@ -36,6 +36,12 @@ from .biology import (
 )
 from .telemetry import TelemetryRecorder, REQUIRED_EVENT_KINDS, replay_lineage
 from .compose import ResidualComposeCell, compose_width, param_overhead
+from .cell_environment import (
+    ENVIRONMENT_AXES,
+    ChemicalCompartment,
+    CellEnvironment,
+    audit_taxonomic_coherence,
+)
 from .legacy_shim import ALIAS_TABLE, alias_table
 
 __all__ = [
@@ -46,5 +52,7 @@ __all__ = [
     "Autophagy", "Apoptosis", "CellLineage", "assert_compose_redline",
     "TelemetryRecorder", "REQUIRED_EVENT_KINDS", "replay_lineage",
     "ResidualComposeCell", "compose_width", "param_overhead",
+    "ENVIRONMENT_AXES", "ChemicalCompartment", "CellEnvironment",
+    "audit_taxonomic_coherence",
     "ALIAS_TABLE", "alias_table",
 ]
